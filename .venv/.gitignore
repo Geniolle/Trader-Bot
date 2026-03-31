@@ -1,0 +1,62 @@
+# ==============================================================================
+# GITIGNORE - TRADER-BOT (PYTHON/FASTAPI)
+# ==============================================================================
+
+# --- AMBIENTES VIRTUAIS (Dependencies) ---
+# Nunca subir as bibliotecas instaladas; usa-se o requirements.txt para isso.
+.venv/
+venv/
+env/
+ENV/
+node_modules/
+
+# --- CACHE E COMPILADOS ---
+# Arquivos gerados pelo Python que não são necessários no repositório.
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+app/**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+
+# --- CONFIGURAÇÕES SENSÍVEIS (Segurança!) ---
+# Onde ficam as tuas chaves de API (TwelveData, Exchange, DB) e senhas.
+.env
+.env.local
+.env.shared
+.env.test
+secrets.json
+*.pem
+*.key
+
+# --- BASE DE DATOS E TEMPORÁRIOS ---
+# Evita subir dados locais ou bases de dados de teste.
+*.db
+*.sqlite3
+*.csv
+*.json_lines
+storage/*.db
+
+# --- CONFIGURAÇÕES DE EDITOR/IDE ---
+# Configurações específicas do teu VS Code ou PyCharm.
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- LOGS E PERFORMANCE ---
+# Arquivos de registo de erros e eventos do bot.
+*.log
+logs/
+*.pid
+
+# --- SISTEMA OPERACIONAL ---
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+desktop.ini
