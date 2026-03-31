@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.v1.endpoints.batch_runs import router as batch_runs_router
 from app.api.v1.endpoints.candles import router as candles_router
 from app.api.v1.endpoints.health import router as health_router
 from app.api.v1.endpoints.providers import router as providers_router
@@ -15,6 +16,7 @@ api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(health_router, tags=["health"])
 api_router.include_router(strategies_router)
 api_router.include_router(runs_router)
+api_router.include_router(batch_runs_router)
 api_router.include_router(providers_router)
 api_router.include_router(run_history_router)
 api_router.include_router(run_metrics_router)
