@@ -1,7 +1,7 @@
 from app.engine.case_engine import CaseEngine
 from app.engine.metrics_engine import MetricsEngine
 from app.models.domain.candle import Candle
-from app.models.domain.enums import CaseStatus, RunStatus
+from app.models.domain.enums import CaseOutcome, CaseStatus, RunStatus
 from app.models.domain.strategy_case import StrategyCase
 from app.models.domain.strategy_config import StrategyConfig
 from app.models.domain.strategy_run import StrategyRun
@@ -71,6 +71,26 @@ class RunEngine:
 
         working_run.status = RunStatus.COMPLETED
         working_run.finished_at = candles[-1].close_time if candles else None
+
+        if candles and open_cases:
+            last_candle = candles[-1]
+            finalized_open_cases: list[StrategyCase] = []
+
+            for case in open_cases:
+                updated_case = case.model_copy(deep=True)
+                updated_case.status = CaseStatus.CLOSED
+                updated_case.outcome = CaseOutcome.TIMEOUT
+                updated_case.close_time = last_candle.close_time
+                updated_case.close_price = last_candle.close
+                updated_case.metadata = {
+                    **updated_case.metadata,
+                    "close_reason": "run_finished_with_case_still_open",
+                }
+                finalized_open_cases.append(updated_case)
+
+            closed_cases.extend(finalized_open_cases)
+            working_run.total_cases_closed += len(finalized_open_cases)
+            open_cases = []
 
         metrics = self.metrics_engine.build_metrics(
             run_id=working_run.id or "run-placeholder",
