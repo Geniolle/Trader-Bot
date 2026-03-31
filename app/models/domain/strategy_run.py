@@ -7,6 +7,7 @@ from app.models.domain.enums import RunMode, RunStatus
 
 class StrategyRun(BaseModel):
     id: str | None = Field(default=None)
+    strategy_key: str | None = None
     strategy_config_id: str
     mode: RunMode
     asset_id: str | None = None
