@@ -1,11 +1,6 @@
 from decimal import Decimal
 
-from app.api.v1.endpoints.comparisons import compare_strategies
-
-
-class DummySession:
-    def close(self) -> None:
-        pass
+from app.services.comparison_service import ComparisonService
 
 
 class DummyMetrics:
@@ -42,7 +37,15 @@ class DummyRun:
         self.strategy_key = strategy_key
 
 
-def test_compare_strategies_ignores_zero_case_runs_for_averages(monkeypatch) -> None:
+class DummyComparisonRepository:
+    def __init__(self, grouped) -> None:
+        self.grouped = grouped
+
+    def compare_by_strategy(self, session, symbol, timeframe, strategy_key, limit):
+        return self.grouped
+
+
+def test_compare_strategies_ignores_zero_case_runs_for_averages() -> None:
     grouped = {
         "ema_cross": [
             (
@@ -96,20 +99,10 @@ def test_compare_strategies_ignores_zero_case_runs_for_averages(monkeypatch) -> 
         ]
     }
 
-    class DummyComparisonRepository:
-        def compare_by_strategy(self, session, symbol, timeframe, strategy_key, limit):
-            return grouped
+    service = ComparisonService(repository=DummyComparisonRepository(grouped))
 
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.comparisons.SessionLocal",
-        lambda: DummySession(),
-    )
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.comparisons.StrategyComparisonQueryRepository",
-        lambda: DummyComparisonRepository(),
-    )
-
-    response = compare_strategies(
+    response = service.compare_strategies(
+        session=object(),
         symbol="AAPL",
         timeframe="1h",
         strategy_key="ema_cross",
@@ -139,7 +132,7 @@ def test_compare_strategies_ignores_zero_case_runs_for_averages(monkeypatch) -> 
     assert item.avg_mae == Decimal("1.51946850")
 
 
-def test_compare_strategies_returns_zero_averages_when_all_runs_have_zero_cases(monkeypatch) -> None:
+def test_compare_strategies_returns_zero_averages_when_all_runs_have_zero_cases() -> None:
     grouped = {
         "bollinger_reversal": [
             (
@@ -161,20 +154,10 @@ def test_compare_strategies_returns_zero_averages_when_all_runs_have_zero_cases(
         ]
     }
 
-    class DummyComparisonRepository:
-        def compare_by_strategy(self, session, symbol, timeframe, strategy_key, limit):
-            return grouped
+    service = ComparisonService(repository=DummyComparisonRepository(grouped))
 
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.comparisons.SessionLocal",
-        lambda: DummySession(),
-    )
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.comparisons.StrategyComparisonQueryRepository",
-        lambda: DummyComparisonRepository(),
-    )
-
-    response = compare_strategies(
+    response = service.compare_strategies(
+        session=object(),
         symbol="AAPL",
         timeframe="1h",
         strategy_key="bollinger_reversal",
