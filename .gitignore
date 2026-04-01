@@ -5,10 +5,23 @@ __pycache__/
 *.pyc
 *.pyo
 
+.pytest_cache/
+.coverage
+htmlcov/
+coverage/
+
+.env
+.env.*
+
 *.db
 *.sqlite3
 
-.pytest_cache/
 dist/
 build/
-.env
+*.egg-info/
+
+.vscode/
+.idea/
+
+.DS_Store
+Thumbs.db

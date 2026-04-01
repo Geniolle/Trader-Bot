@@ -3,6 +3,7 @@ from fastapi import APIRouter, Query
 from app.schemas.comparison import StrategyComparisonResponse
 from app.services.comparison_service import ComparisonService
 from app.storage.database import SessionLocal
+from app.storage.repositories.comparison_queries import StrategyComparisonQueryRepository
 
 router = APIRouter(prefix="/comparisons", tags=["comparisons"])
 
@@ -16,7 +17,9 @@ def compare_strategies(
 ) -> StrategyComparisonResponse:
     session = SessionLocal()
     try:
-        service = ComparisonService()
+        service = ComparisonService(
+            repository=StrategyComparisonQueryRepository(),
+        )
         return service.compare_strategies(
             session=session,
             symbol=symbol,

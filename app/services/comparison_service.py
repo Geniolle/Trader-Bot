@@ -8,8 +8,11 @@ from app.storage.repositories.comparison_queries import StrategyComparisonQueryR
 
 
 class ComparisonService:
-    def __init__(self) -> None:
-        self.repository = StrategyComparisonQueryRepository()
+    def __init__(
+        self,
+        repository: StrategyComparisonQueryRepository | None = None,
+    ) -> None:
+        self.repository = repository or StrategyComparisonQueryRepository()
 
     def compare_strategies(
         self,
@@ -65,7 +68,10 @@ class ComparisonService:
                 )
             )
 
-        results.sort(key=lambda x: x.avg_hit_rate, reverse=True)
+        results.sort(
+            key=lambda item: (item.avg_hit_rate, item.total_cases),
+            reverse=True,
+        )
 
         return StrategyComparisonResponse(
             symbol=symbol,
@@ -79,6 +85,9 @@ class ComparisonService:
         values: list[Decimal] = []
 
         for _, metrics in items:
+            if (metrics.total_cases or 0) <= 0:
+                continue
+
             value = getattr(metrics, field_name, None)
             if value is not None:
                 values.append(Decimal(value))
