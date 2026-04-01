@@ -25,6 +25,10 @@ git add . ; git commit -m "Descricao da alteracao" ; git push
 
 🚀 Passo 1: Aceder à pasta do projeto no servidor
 .venv\Scripts\Activate.ps1
+uvicorn app.main:app
+.\test_api.ps1ç
+
+
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --reload-exclude .venv
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8010
 
