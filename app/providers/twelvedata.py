@@ -1,5 +1,7 @@
+# app/providers/twelvedata.py
+
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -29,11 +31,14 @@ class TwelveDataProvider(BaseMarketDataProvider):
 
         interval = self._map_timeframe_to_interval(timeframe)
 
+        normalized_start = self._normalize_datetime(start_at)
+        normalized_end = self._normalize_datetime(end_at)
+
         params = {
             "symbol": symbol,
             "interval": interval,
-            "start_date": start_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_date": end_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "start_date": normalized_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_date": normalized_end.strftime("%Y-%m-%d %H:%M:%S"),
             "outputsize": 5000,
             "order": "asc",
             "format": "JSON",
@@ -86,6 +91,7 @@ class TwelveDataProvider(BaseMarketDataProvider):
             raise ValueError("Unexpected Twelve Data response format")
 
         candles: list[Candle] = []
+
         for item in values:
             close_time = self._parse_twelvedata_datetime(item["datetime"])
             open_time = self._infer_open_time(close_time, timeframe)
@@ -107,6 +113,11 @@ class TwelveDataProvider(BaseMarketDataProvider):
 
         return candles
 
+    def _normalize_datetime(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
     def _map_timeframe_to_interval(self, timeframe: str) -> str:
         mapping = {
             "1m": "1min",
@@ -122,10 +133,11 @@ class TwelveDataProvider(BaseMarketDataProvider):
             "1mo": "1month",
         }
 
-        if timeframe not in mapping:
+        interval = mapping.get(timeframe)
+        if interval is None:
             raise ValueError(f"Unsupported timeframe for Twelve Data: {timeframe}")
 
-        return mapping[timeframe]
+        return interval
 
     def _parse_twelvedata_datetime(self, value: str) -> datetime:
         formats = [
@@ -135,7 +147,8 @@ class TwelveDataProvider(BaseMarketDataProvider):
 
         for fmt in formats:
             try:
-                return datetime.strptime(value, fmt)
+                parsed = datetime.strptime(value, fmt)
+                return parsed.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
 

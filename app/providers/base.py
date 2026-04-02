@@ -1,4 +1,7 @@
+# app/providers/base.py
+
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from app.models.domain.candle import Candle
 
@@ -16,8 +19,8 @@ class BaseMarketDataProvider(ABC):
         self,
         symbol: str,
         timeframe: str,
-        start_at,
-        end_at,
+        start_at: datetime,
+        end_at: datetime,
     ) -> list[Candle]:
         """
         Fetch historical candles already normalized to the internal Candle model.

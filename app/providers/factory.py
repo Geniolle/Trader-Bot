@@ -1,3 +1,5 @@
+# app/providers/factory.py
+
 from app.providers.base import BaseMarketDataProvider
 from app.providers.mock import MockMarketDataProvider
 from app.providers.twelvedata import TwelveDataProvider
@@ -11,10 +13,14 @@ class MarketDataProviderFactory:
         }
 
     def get_provider(self, provider_name: str) -> BaseMarketDataProvider:
-        provider_class = self._providers.get(provider_name)
+        normalized_name = (provider_name or "").strip().lower()
+        provider_class = self._providers.get(normalized_name)
 
         if provider_class is None:
-            raise KeyError(f"Provider not found: {provider_name}")
+            available = ", ".join(self.list_providers())
+            raise KeyError(
+                f"Provider not found: {provider_name}. Available providers: {available}"
+            )
 
         return provider_class()
 

@@ -1,3 +1,5 @@
+# app/core/settings.py
+
 from functools import lru_cache
 
 from pydantic import Field
@@ -14,7 +16,7 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     timezone: str = Field(default="UTC")
 
-    market_data_provider: str = Field(default="mock")
+    market_data_provider: str = Field(default="twelvedata")
 
     twelvedata_api_key: str = Field(default="")
     twelvedata_base_url: str = Field(default="https://api.twelvedata.com")
