@@ -25,12 +25,25 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         while True:
             counter += 1
             await asyncio.sleep(5)
+
             await websocket.send_json(
                 {
                     "event": "heartbeat",
                     "data": {
                         "count": counter,
                         "message": "heartbeat from backend",
+                    },
+                }
+            )
+
+            await websocket.send_json(
+                {
+                    "event": "candles_refresh",
+                    "data": {
+                        "symbol": "EURUSD",
+                        "timeframe": "5m",
+                        "reason": "scheduled_refresh",
+                        "count": counter,
                     },
                 }
             )
