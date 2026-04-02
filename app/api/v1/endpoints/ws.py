@@ -42,8 +42,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 {
                     "event": "candles_refresh",
                     "data": {
-                        "symbol": "EURUSD",
-                        "timeframe": "5m",
+                        "symbol": "AAPL",
+                        "timeframe": "1m",
                         "reason": "scheduled_refresh",
                         "count": counter,
                     },
@@ -59,8 +59,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 {
                     "event": "candle_tick",
                     "data": {
-                        "symbol": "EURUSD",
-                        "timeframe": "5m",
+                        "symbol": "AAPL",
+                        "timeframe": "1m",
                         "open_time": datetime.now(timezone.utc).isoformat(),
                         "open": open_price,
                         "high": high_price,
