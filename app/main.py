@@ -4,8 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.logging import get_logger, setup_logging
 from app.core.settings import get_settings
-from app.storage.database import Base, engine
-from app.storage import models  # noqa: F401
 
 setup_logging()
 
@@ -36,6 +34,3 @@ def on_startup() -> None:
     logger.info("Application starting")
     logger.info("Environment: %s", settings.app_env)
     logger.info("Timezone: %s", settings.timezone)
-
-    Base.metadata.create_all(bind=engine)
-    logger.info("Database tables checked/created successfully")
