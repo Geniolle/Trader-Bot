@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import suppress
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -21,6 +22,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     async def heartbeat_loop() -> None:
         counter = 0
+        base_price = 248.50
 
         while True:
             counter += 1
@@ -43,6 +45,27 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "symbol": "EURUSD",
                         "timeframe": "5m",
                         "reason": "scheduled_refresh",
+                        "count": counter,
+                    },
+                }
+            )
+
+            open_price = round(base_price + (counter * 0.01), 5)
+            high_price = round(open_price + 0.08, 5)
+            low_price = round(open_price - 0.06, 5)
+            close_price = round(open_price + 0.03, 5)
+
+            await websocket.send_json(
+                {
+                    "event": "candle_tick",
+                    "data": {
+                        "symbol": "EURUSD",
+                        "timeframe": "5m",
+                        "open_time": datetime.now(timezone.utc).isoformat(),
+                        "open": open_price,
+                        "high": high_price,
+                        "low": low_price,
+                        "close": close_price,
                         "count": counter,
                     },
                 }
