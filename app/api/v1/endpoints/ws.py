@@ -1,6 +1,7 @@
 # app/api/v1/endpoints/ws.py
 
 import asyncio
+import json
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 
@@ -30,24 +31,43 @@ def _build_provider_metadata(provider_name: str, settings_timezone: str) -> dict
     }
 
 
+def _normalize_symbol(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().upper()
+
+
+def _normalize_timeframe(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower()
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
 
     settings = get_settings()
-    provider_name = settings.market_data_provider
     provider_factory = MarketDataProviderFactory()
-    provider = provider_factory.get_provider(provider_name)
+    provider = provider_factory.get_provider(settings.market_data_provider)
+
     provider_metadata = _build_provider_metadata(
         provider.provider_name(),
         settings.timezone,
     )
+
+    subscription = {
+        "symbol": "AAPL",
+        "timeframe": "1m",
+    }
 
     await websocket.send_json(
         {
             "event": "connected",
             "data": {
                 "message": "WebSocket connected successfully",
+                "symbol": subscription["symbol"],
+                "timeframe": subscription["timeframe"],
                 **provider_metadata,
             },
         }
@@ -55,16 +75,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     async def heartbeat_loop() -> None:
         counter = 0
-        symbol = "AAPL"
-        timeframe = "1m"
 
         while True:
             counter += 1
             await asyncio.sleep(5)
 
-            now_utc = datetime.now(timezone.utc)
+            symbol = subscription["symbol"]
+            timeframe = subscription["timeframe"]
 
-            # Janela maior para reduzir erro de "no data available"
+            now_utc = datetime.now(timezone.utc)
             end_at = now_utc
             start_at = end_at - timedelta(hours=2)
 
@@ -74,6 +93,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     "data": {
                         "count": counter,
                         "message": "heartbeat from backend",
+                        "symbol": symbol,
+                        "timeframe": timeframe,
                         **provider_metadata,
                     },
                 }
@@ -193,16 +214,86 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     try:
         while True:
-            data = await websocket.receive_text()
+            raw_message = await websocket.receive_text()
+
+            if raw_message == "frontend_connected":
+                await websocket.send_json(
+                    {
+                        "event": "echo",
+                        "data": {
+                            "message": raw_message,
+                            "symbol": subscription["symbol"],
+                            "timeframe": subscription["timeframe"],
+                            **provider_metadata,
+                        },
+                    }
+                )
+                continue
+
+            try:
+                parsed_message = json.loads(raw_message)
+            except json.JSONDecodeError:
+                await websocket.send_json(
+                    {
+                        "event": "echo",
+                        "data": {
+                            "message": raw_message,
+                            "symbol": subscription["symbol"],
+                            "timeframe": subscription["timeframe"],
+                            **provider_metadata,
+                        },
+                    }
+                )
+                continue
+
+            action = str(parsed_message.get("action", "")).strip().lower()
+
+            if action == "subscribe":
+                next_symbol = _normalize_symbol(parsed_message.get("symbol"))
+                next_timeframe = _normalize_timeframe(parsed_message.get("timeframe"))
+
+                if not next_symbol or not next_timeframe:
+                    await websocket.send_json(
+                        {
+                            "event": "subscription_error",
+                            "data": {
+                                "message": "Both symbol and timeframe are required for subscribe.",
+                                "received_symbol": parsed_message.get("symbol"),
+                                "received_timeframe": parsed_message.get("timeframe"),
+                                **provider_metadata,
+                            },
+                        }
+                    )
+                    continue
+
+                subscription["symbol"] = next_symbol
+                subscription["timeframe"] = next_timeframe
+
+                await websocket.send_json(
+                    {
+                        "event": "subscribed",
+                        "data": {
+                            "message": "Subscription updated successfully.",
+                            "symbol": subscription["symbol"],
+                            "timeframe": subscription["timeframe"],
+                            **provider_metadata,
+                        },
+                    }
+                )
+                continue
+
             await websocket.send_json(
                 {
                     "event": "echo",
                     "data": {
-                        "message": data,
+                        "message": raw_message,
+                        "symbol": subscription["symbol"],
+                        "timeframe": subscription["timeframe"],
                         **provider_metadata,
                     },
                 }
             )
+
     except WebSocketDisconnect:
         pass
     finally:

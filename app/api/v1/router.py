@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints.batch_runs import router as batch_runs_router
 from app.api.v1.endpoints.candles import router as candles_router
 from app.api.v1.endpoints.catalog import router as catalog_router
+from app.api.v1.endpoints.comparisons import router as comparisons_router
 from app.api.v1.endpoints.health import router as health_router
 from app.api.v1.endpoints.providers import router as providers_router
 from app.api.v1.endpoints.run_cases import router as run_cases_router
@@ -20,10 +21,11 @@ api_router.include_router(strategies_router)
 api_router.include_router(runs_router)
 api_router.include_router(batch_runs_router)
 api_router.include_router(providers_router)
-api_router.include_router(catalog_router)
 api_router.include_router(run_history_router)
 api_router.include_router(run_metrics_router)
 api_router.include_router(run_cases_router)
 api_router.include_router(run_details_router)
 api_router.include_router(candles_router)
+api_router.include_router(comparisons_router)
+api_router.include_router(catalog_router)
 api_router.include_router(ws_router)
