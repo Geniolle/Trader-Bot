@@ -30,12 +30,13 @@ class TwelveDataProvider(BaseMarketDataProvider):
             raise ValueError("Twelve Data API key is not configured")
 
         interval = self._map_timeframe_to_interval(timeframe)
+        provider_symbol = self._normalize_symbol_for_twelvedata(symbol)
 
         normalized_start = self._normalize_datetime(start_at)
         normalized_end = self._normalize_datetime(end_at)
 
         params = {
-            "symbol": symbol,
+            "symbol": provider_symbol,
             "interval": interval,
             "start_date": normalized_start.strftime("%Y-%m-%d %H:%M:%S"),
             "end_date": normalized_end.strftime("%Y-%m-%d %H:%M:%S"),
@@ -45,6 +46,18 @@ class TwelveDataProvider(BaseMarketDataProvider):
         }
 
         url = f"{self.settings.twelvedata_base_url}/time_series?{urlencode(params)}"
+
+        print(
+            {
+                "event": "twelvedata_request_debug",
+                "original_symbol": symbol,
+                "provider_symbol": provider_symbol,
+                "timeframe": timeframe,
+                "interval": interval,
+                "start_at": normalized_start.isoformat(),
+                "end_at": normalized_end.isoformat(),
+            }
+        )
 
         request = Request(
             url,
@@ -118,6 +131,54 @@ class TwelveDataProvider(BaseMarketDataProvider):
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
+    def _normalize_symbol_for_twelvedata(self, symbol: str) -> str:
+        normalized = symbol.strip().upper()
+
+        if not normalized:
+            return normalized
+
+        if "/" in normalized:
+            return normalized
+
+        if normalized.endswith(".P"):
+            return normalized
+
+        forex_currencies = {
+            "USD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "CHF",
+            "AUD",
+            "CAD",
+            "NZD",
+        }
+
+        if len(normalized) == 6:
+            base_asset = normalized[:3]
+            quote_asset = normalized[3:]
+
+            if base_asset in forex_currencies and quote_asset in forex_currencies:
+                return f"{base_asset}/{quote_asset}"
+
+        crypto_quotes = [
+            "USDT",
+            "USDC",
+            "USD",
+            "BTC",
+            "ETH",
+            "EUR",
+        ]
+
+        for quote in crypto_quotes:
+            if normalized.endswith(quote) and len(normalized) > len(quote):
+                base_asset = normalized[: -len(quote)]
+
+                if base_asset and base_asset.isalnum():
+                    return f"{base_asset}/{quote}"
+
+        return normalized
+
     def _map_timeframe_to_interval(self, timeframe: str) -> str:
         mapping = {
             "1m": "1min",
@@ -129,11 +190,14 @@ class TwelveDataProvider(BaseMarketDataProvider):
             "2h": "2h",
             "4h": "4h",
             "1d": "1day",
+            "1day": "1day",
             "1w": "1week",
+            "1week": "1week",
             "1mo": "1month",
+            "1month": "1month",
         }
 
-        interval = mapping.get(timeframe)
+        interval = mapping.get(timeframe.strip().lower())
         if interval is None:
             raise ValueError(f"Unsupported timeframe for Twelve Data: {timeframe}")
 
@@ -155,27 +219,29 @@ class TwelveDataProvider(BaseMarketDataProvider):
         raise ValueError(f"Unsupported datetime format from Twelve Data: {value}")
 
     def _infer_open_time(self, close_time: datetime, timeframe: str) -> datetime:
-        if timeframe == "1m":
+        normalized = timeframe.strip().lower()
+
+        if normalized == "1m":
             return close_time - timedelta(minutes=1)
-        if timeframe == "5m":
+        if normalized == "5m":
             return close_time - timedelta(minutes=5)
-        if timeframe == "15m":
+        if normalized == "15m":
             return close_time - timedelta(minutes=15)
-        if timeframe == "30m":
+        if normalized == "30m":
             return close_time - timedelta(minutes=30)
-        if timeframe == "45m":
+        if normalized == "45m":
             return close_time - timedelta(minutes=45)
-        if timeframe == "1h":
+        if normalized == "1h":
             return close_time - timedelta(hours=1)
-        if timeframe == "2h":
+        if normalized == "2h":
             return close_time - timedelta(hours=2)
-        if timeframe == "4h":
+        if normalized == "4h":
             return close_time - timedelta(hours=4)
-        if timeframe == "1d":
+        if normalized in ("1d", "1day"):
             return close_time - timedelta(days=1)
-        if timeframe == "1w":
+        if normalized in ("1w", "1week"):
             return close_time - timedelta(weeks=1)
-        if timeframe == "1mo":
+        if normalized in ("1mo", "1month"):
             return close_time - timedelta(days=30)
 
         raise ValueError(f"Unsupported timeframe for open_time inference: {timeframe}")

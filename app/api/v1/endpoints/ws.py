@@ -43,6 +43,97 @@ def _normalize_timeframe(value: object) -> str:
     return value.strip().lower()
 
 
+def _resolve_lookback_delta(timeframe: str) -> timedelta:
+    normalized = timeframe.strip().lower()
+
+    if normalized == "1m":
+        return timedelta(hours=6)
+    if normalized == "5m":
+        return timedelta(days=1)
+    if normalized == "15m":
+        return timedelta(days=2)
+    if normalized == "30m":
+        return timedelta(days=3)
+    if normalized == "45m":
+        return timedelta(days=4)
+    if normalized == "1h":
+        return timedelta(days=7)
+    if normalized == "2h":
+        return timedelta(days=10)
+    if normalized == "4h":
+        return timedelta(days=20)
+    if normalized in ("1d", "1day"):
+        return timedelta(days=60)
+    if normalized in ("1w", "1week"):
+        return timedelta(days=365)
+    if normalized in ("1mo", "1month"):
+        return timedelta(days=730)
+
+    return timedelta(days=3)
+
+
+def _resolve_poll_seconds(timeframe: str) -> int:
+    normalized = timeframe.strip().lower()
+
+    if normalized == "1m":
+        return 20
+    if normalized == "5m":
+        return 60
+    if normalized == "15m":
+        return 180
+    if normalized == "30m":
+        return 300
+    if normalized == "45m":
+        return 300
+    if normalized == "1h":
+        return 600
+    if normalized == "2h":
+        return 900
+    if normalized == "4h":
+        return 1800
+    if normalized in ("1d", "1day"):
+        return 3600
+    if normalized in ("1w", "1week"):
+        return 21600
+    if normalized in ("1mo", "1month"):
+        return 43200
+
+    return 60
+
+
+def _build_time_window(timeframe: str) -> tuple[datetime, datetime]:
+    now_utc = datetime.now(timezone.utc)
+    safe_end_at = now_utc - timedelta(minutes=5)
+    safe_start_at = safe_end_at - _resolve_lookback_delta(timeframe)
+    return safe_start_at, safe_end_at
+
+
+def _serialize_candle(candle, provider_name: str, settings_timezone: str) -> dict:
+    return {
+        "id": f"{candle.symbol}:{candle.timeframe}:{candle.open_time.isoformat()}",
+        "asset_id": None,
+        "symbol": candle.symbol,
+        "timeframe": candle.timeframe,
+        "open_time": candle.open_time.astimezone(timezone.utc)
+        .replace(second=0, microsecond=0)
+        .isoformat(),
+        "close_time": candle.close_time.astimezone(timezone.utc)
+        .replace(second=0, microsecond=0)
+        .isoformat(),
+        "open": str(candle.open),
+        "high": str(candle.high),
+        "low": str(candle.low),
+        "close": str(candle.close),
+        "volume": str(candle.volume),
+        "source": candle.source or provider_name,
+        "provider": provider_name,
+        "market_session": "simulated" if _is_mock_provider(provider_name) else "live",
+        "timezone": settings_timezone or "UTC",
+        "is_delayed": False,
+        "is_mock": _is_mock_provider(provider_name),
+    }
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -51,14 +142,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     provider_factory = MarketDataProviderFactory()
     provider = provider_factory.get_provider(settings.market_data_provider)
 
-    provider_metadata = _build_provider_metadata(
-        provider.provider_name(),
-        settings.timezone,
-    )
+    provider_name = provider.provider_name()
+    provider_metadata = _build_provider_metadata(provider_name, settings.timezone)
 
     subscription = {
         "symbol": "AAPL",
-        "timeframe": "1m",
+        "timeframe": "1h",
     }
 
     await websocket.send_json(
@@ -73,19 +162,90 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         }
     )
 
+    async def send_initial_candles(symbol: str, timeframe: str) -> None:
+        start_at, end_at = _build_time_window(timeframe)
+
+        try:
+            candles = provider.get_historical_candles(
+                symbol=symbol,
+                timeframe=timeframe,
+                start_at=start_at,
+                end_at=end_at,
+            )
+
+            serialized_candles = [
+                _serialize_candle(
+                    candle=candle,
+                    provider_name=provider_name,
+                    settings_timezone=settings.timezone,
+                )
+                for candle in candles
+            ]
+
+            print(
+                {
+                    "event": "initial_candles_debug",
+                    "status": "success",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "count": len(serialized_candles),
+                    "start_at": start_at.isoformat(),
+                    "end_at": end_at.isoformat(),
+                }
+            )
+
+            await websocket.send_json(
+                {
+                    "event": "initial_candles",
+                    "data": {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "count": len(serialized_candles),
+                        "candles": serialized_candles,
+                        "start_at": start_at.isoformat(),
+                        "end_at": end_at.isoformat(),
+                        **provider_metadata,
+                    },
+                }
+            )
+        except Exception as exc:
+            print(
+                {
+                    "event": "initial_candles_debug",
+                    "status": "error",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "start_at": start_at.isoformat(),
+                    "end_at": end_at.isoformat(),
+                    "error": str(exc),
+                }
+            )
+
+            await websocket.send_json(
+                {
+                    "event": "provider_error",
+                    "data": {
+                        "message": str(exc),
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "start_at": start_at.isoformat(),
+                        "end_at": end_at.isoformat(),
+                        **provider_metadata,
+                    },
+                }
+            )
+
     async def heartbeat_loop() -> None:
         counter = 0
 
         while True:
+            poll_seconds = _resolve_poll_seconds(subscription["timeframe"])
+            await asyncio.sleep(poll_seconds)
             counter += 1
-            await asyncio.sleep(5)
 
             symbol = subscription["symbol"]
             timeframe = subscription["timeframe"]
-
-            now_utc = datetime.now(timezone.utc)
-            end_at = now_utc
-            start_at = end_at - timedelta(hours=2)
+            start_at, end_at = _build_time_window(timeframe)
 
             await websocket.send_json(
                 {
@@ -95,19 +255,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "message": "heartbeat from backend",
                         "symbol": symbol,
                         "timeframe": timeframe,
-                        **provider_metadata,
-                    },
-                }
-            )
-
-            await websocket.send_json(
-                {
-                    "event": "candles_refresh",
-                    "data": {
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "reason": "scheduled_refresh",
-                        "count": counter,
+                        "poll_seconds": poll_seconds,
                         **provider_metadata,
                     },
                 }
@@ -130,6 +278,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                                 "symbol": symbol,
                                 "timeframe": timeframe,
                                 "count": counter,
+                                "poll_seconds": poll_seconds,
                                 "start_at": start_at.isoformat(),
                                 "end_at": end_at.isoformat(),
                                 **provider_metadata,
@@ -151,14 +300,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     "low": float(last_candle.low),
                     "close": float(last_candle.close),
                     "count": counter,
-                    "source": last_candle.source or provider.provider_name(),
-                    "provider": provider.provider_name(),
-                    "market_session": "simulated"
-                    if _is_mock_provider(provider.provider_name())
-                    else "live",
+                    "poll_seconds": poll_seconds,
+                    "source": last_candle.source or provider_name,
+                    "provider": provider_name,
+                    "market_session": "simulated" if _is_mock_provider(provider_name) else "live",
                     "timezone": settings.timezone or "UTC",
                     "is_delayed": False,
-                    "is_mock": _is_mock_provider(provider.provider_name()),
+                    "is_mock": _is_mock_provider(provider_name),
                 }
 
                 print(
@@ -167,6 +315,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "status": "success",
                         "symbol": symbol,
                         "timeframe": timeframe,
+                        "poll_seconds": poll_seconds,
                         "start_at": start_at.isoformat(),
                         "end_at": end_at.isoformat(),
                         **tick_payload,
@@ -187,11 +336,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "status": "error",
                         "symbol": symbol,
                         "timeframe": timeframe,
+                        "poll_seconds": poll_seconds,
                         "start_at": start_at.isoformat(),
                         "end_at": end_at.isoformat(),
                         "error": str(exc),
                         "count": counter,
-                        "provider": provider.provider_name(),
+                        "provider": provider_name,
                     }
                 )
 
@@ -203,6 +353,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             "symbol": symbol,
                             "timeframe": timeframe,
                             "count": counter,
+                            "poll_seconds": poll_seconds,
                             "start_at": start_at.isoformat(),
                             "end_at": end_at.isoformat(),
                             **provider_metadata,
@@ -276,9 +427,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             "message": "Subscription updated successfully.",
                             "symbol": subscription["symbol"],
                             "timeframe": subscription["timeframe"],
+                            "poll_seconds": _resolve_poll_seconds(subscription["timeframe"]),
                             **provider_metadata,
                         },
                     }
+                )
+
+                await send_initial_candles(
+                    symbol=subscription["symbol"],
+                    timeframe=subscription["timeframe"],
                 )
                 continue
 
