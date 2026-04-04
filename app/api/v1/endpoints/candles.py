@@ -1,12 +1,10 @@
-# app/api/v1/endpoints/candles.py
-
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Query
 
-from app.schemas.run import CandleResponse
+from app.schemas.run import CandleListResponse, CandleResponse
 from app.storage.database import SessionLocal
 from app.storage.repositories.candle_queries import CandleQueryRepository
 
@@ -60,7 +58,7 @@ def timeframe_to_window(timeframe: str, mode: str) -> timedelta:
     return mapping.get(normalized, timedelta(days=15))
 
 
-@router.get("", response_model=list[CandleResponse])
+@router.get("", response_model=CandleListResponse)
 def list_candles(
     symbol: str = Query(...),
     timeframe: str = Query(...),
@@ -68,7 +66,7 @@ def list_candles(
     end_at: datetime | None = Query(default=None),
     limit: int = Query(default=500, ge=1, le=5000),
     mode: str = Query(default="full", pattern="^(full|incremental)$"),
-) -> list[CandleResponse]:
+) -> CandleListResponse:
     session = SessionLocal()
     try:
         normalized_symbol = symbol.strip().upper()
@@ -93,7 +91,7 @@ def list_candles(
             limit=limit,
         )
 
-        return [
+        items = [
             CandleResponse(
                 id=row.id,
                 asset_id=row.asset_id,
@@ -110,5 +108,20 @@ def list_candles(
             )
             for row in rows
         ]
+
+        first_open_time = items[0].open_time if items else None
+        last_close_time = items[-1].close_time if items else None
+
+        return CandleListResponse(
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            mode=mode,
+            count=len(items),
+            start_at=effective_start_at,
+            end_at=effective_end_at,
+            first_open_time=first_open_time,
+            last_close_time=last_close_time,
+            items=items,
+        )
     finally:
         session.close()

@@ -33,6 +33,18 @@ class CandleResponse(BaseModel):
     source: str | None = None
 
 
+class CandleListResponse(BaseModel):
+    symbol: str
+    timeframe: str
+    mode: str
+    count: int
+    start_at: datetime
+    end_at: datetime
+    first_open_time: datetime | None = None
+    last_close_time: datetime | None = None
+    items: list[CandleResponse]
+
+
 class StrategyRunResponse(BaseModel):
     id: str | None = None
     strategy_key: str | None = None
