@@ -1,4 +1,5 @@
-from datetime import timedelta
+# app/strategies/bollinger_reversal.py
+
 from decimal import Decimal
 
 from app.indicators.bollinger import bollinger_bands
@@ -8,6 +9,7 @@ from app.models.domain.strategy_case import StrategyCase
 from app.models.domain.strategy_config import StrategyConfig
 from app.models.domain.strategy_definition import StrategyDefinition
 from app.models.domain.strategy_run import StrategyRun
+from app.services.case_snapshot import build_case_metadata_snapshot
 from app.strategies.base import BaseStrategy
 from app.strategies.decisions import CaseCloseDecision, TriggerDecision
 
@@ -16,7 +18,7 @@ class BollingerReversalStrategy(BaseStrategy):
     definition = StrategyDefinition(
         key="bollinger_reversal",
         name="Bollinger Reversal",
-        version="1.0.0",
+        version="1.1.0",
         description=(
             "Detects a reversal after a candle closes above the upper Bollinger band "
             "and the next candle closes back below it, targeting the middle band."
@@ -26,7 +28,7 @@ class BollingerReversalStrategy(BaseStrategy):
 
     def warmup_period(self, config: StrategyConfig) -> int:
         period = int(config.parameters.get("bollinger_period", 20))
-        return period
+        return max(period, 40, 35)
 
     def calculate_indicators(
         self,
@@ -131,6 +133,12 @@ class BollingerReversalStrategy(BaseStrategy):
             candle_duration = current_candle.close_time - current_candle.open_time
             timeout_at = current_candle.close_time + (candle_duration * timeout_bars)
 
+        snapshot = build_case_metadata_snapshot(
+            candles=candles,
+            index=index,
+            config=config,
+        )
+
         return StrategyCase(
             run_id=run.id or "run-placeholder",
             strategy_config_id=config.id or "config-placeholder",
@@ -146,8 +154,12 @@ class BollingerReversalStrategy(BaseStrategy):
             timeout_at=timeout_at,
             metadata={
                 "strategy_key": self.definition.key,
+                "strategy_family": "mean_reversion",
+                "trade_bias": "short",
+                "setup_type": "bollinger_reentry_short",
                 "middle_band": str(middle_band),
                 "confirmation_candle_high": str(current_candle.high),
+                "analysis_snapshot": snapshot,
             },
         )
 

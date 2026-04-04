@@ -1,3 +1,5 @@
+# app/strategies/ema_cross.py
+
 from decimal import Decimal
 
 from app.indicators.ema import exponential_moving_average
@@ -7,6 +9,7 @@ from app.models.domain.strategy_case import StrategyCase
 from app.models.domain.strategy_config import StrategyConfig
 from app.models.domain.strategy_definition import StrategyDefinition
 from app.models.domain.strategy_run import StrategyRun
+from app.services.case_snapshot import build_case_metadata_snapshot
 from app.strategies.base import BaseStrategy
 from app.strategies.decisions import CaseCloseDecision, TriggerDecision
 
@@ -15,7 +18,7 @@ class EmaCrossStrategy(BaseStrategy):
     definition = StrategyDefinition(
         key="ema_cross",
         name="EMA Cross",
-        version="1.0.0",
+        version="1.1.0",
         description=(
             "Detects a bullish crossover where the short EMA crosses above "
             "the long EMA, using percentage target and invalidation."
@@ -26,7 +29,7 @@ class EmaCrossStrategy(BaseStrategy):
     def warmup_period(self, config: StrategyConfig) -> int:
         short_period = int(config.parameters.get("ema_short_period", 9))
         long_period = int(config.parameters.get("ema_long_period", 21))
-        return max(short_period, long_period)
+        return max(short_period, long_period, 40, 35)
 
     def calculate_indicators(
         self,
@@ -121,6 +124,12 @@ class EmaCrossStrategy(BaseStrategy):
             candle_duration = current_candle.close_time - current_candle.open_time
             timeout_at = current_candle.close_time + (candle_duration * timeout_bars)
 
+        snapshot = build_case_metadata_snapshot(
+            candles=candles,
+            index=index,
+            config=config,
+        )
+
         return StrategyCase(
             run_id=run.id or "run-placeholder",
             strategy_config_id=config.id or "config-placeholder",
@@ -136,8 +145,12 @@ class EmaCrossStrategy(BaseStrategy):
             timeout_at=timeout_at,
             metadata={
                 "strategy_key": self.definition.key,
+                "strategy_family": "trend_following",
+                "trade_bias": "long",
+                "setup_type": "ema_bullish_cross",
                 "target_percent": str(target_percent),
                 "stop_percent": str(stop_percent),
+                "analysis_snapshot": snapshot,
             },
         )
 

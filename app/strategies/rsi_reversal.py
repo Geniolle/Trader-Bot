@@ -1,3 +1,5 @@
+# app/strategies/rsi_reversal.py
+
 from decimal import Decimal
 
 from app.indicators.rsi import relative_strength_index
@@ -7,6 +9,7 @@ from app.models.domain.strategy_case import StrategyCase
 from app.models.domain.strategy_config import StrategyConfig
 from app.models.domain.strategy_definition import StrategyDefinition
 from app.models.domain.strategy_run import StrategyRun
+from app.services.case_snapshot import build_case_metadata_snapshot
 from app.strategies.base import BaseStrategy
 from app.strategies.decisions import CaseCloseDecision, TriggerDecision
 
@@ -15,7 +18,7 @@ class RsiReversalStrategy(BaseStrategy):
     definition = StrategyDefinition(
         key="rsi_reversal",
         name="RSI Reversal",
-        version="1.0.0",
+        version="1.1.0",
         description=(
             "Detects a bullish reversal when RSI crosses up from an oversold level, "
             "using percentage target and invalidation."
@@ -24,7 +27,7 @@ class RsiReversalStrategy(BaseStrategy):
     )
 
     def warmup_period(self, config: StrategyConfig) -> int:
-        return int(config.parameters.get("rsi_period", 14)) + 1
+        return max(int(config.parameters.get("rsi_period", 14)) + 1, 40, 35)
 
     def calculate_indicators(
         self,
@@ -108,6 +111,12 @@ class RsiReversalStrategy(BaseStrategy):
             candle_duration = current_candle.close_time - current_candle.open_time
             timeout_at = current_candle.close_time + (candle_duration * timeout_bars)
 
+        snapshot = build_case_metadata_snapshot(
+            candles=candles,
+            index=index,
+            config=config,
+        )
+
         return StrategyCase(
             run_id=run.id or "run-placeholder",
             strategy_config_id=config.id or "config-placeholder",
@@ -123,8 +132,12 @@ class RsiReversalStrategy(BaseStrategy):
             timeout_at=timeout_at,
             metadata={
                 "strategy_key": self.definition.key,
+                "strategy_family": "mean_reversion",
+                "trade_bias": "long",
+                "setup_type": "rsi_recovery_long",
                 "target_percent": str(target_percent),
                 "stop_percent": str(stop_percent),
+                "analysis_snapshot": snapshot,
             },
         )
 

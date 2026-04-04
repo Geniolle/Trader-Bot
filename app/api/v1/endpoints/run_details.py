@@ -1,3 +1,5 @@
+# app/api/v1/endpoints/run_details.py
+
 import json
 
 from fastapi import APIRouter, HTTPException
@@ -29,6 +31,7 @@ def get_run_details(run_id: str) -> RunDetailsResponse:
 
         run_response = StrategyRunResponse(
             id=run_row.id,
+            strategy_key=getattr(run_row, "strategy_key", None),
             strategy_config_id=run_row.strategy_config_id,
             mode=run_row.mode,
             asset_id=run_row.asset_id,
