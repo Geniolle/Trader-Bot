@@ -9,6 +9,7 @@ from app.models.domain.strategy_case import StrategyCase
 from app.models.domain.strategy_config import StrategyConfig
 from app.models.domain.strategy_definition import StrategyDefinition
 from app.models.domain.strategy_run import StrategyRun
+from app.services.case_snapshot import build_case_metadata_snapshot
 from app.strategies.base import BaseStrategy
 from app.strategies.decisions import CaseCloseDecision, TriggerDecision
 
@@ -17,7 +18,7 @@ class FfFdStrategy(BaseStrategy):
     definition = StrategyDefinition(
         key="ff_fd",
         name="FF/FD",
-        version="1.0.0",
+        version="1.1.0",
         description=(
             "Fecho fora da Bollinger e fecho seguinte de volta para dentro, "
             "com alvo na banda média e invalidação na extrema do padrão."
@@ -27,7 +28,7 @@ class FfFdStrategy(BaseStrategy):
 
     def warmup_period(self, config: StrategyConfig) -> int:
         period = int(config.parameters.get("bollinger_period", 20))
-        return period
+        return max(period, 40, 35)
 
     def calculate_indicators(
         self,
@@ -100,6 +101,7 @@ class FfFdStrategy(BaseStrategy):
         if buy_trigger:
             return {
                 "side": "buy",
+                "trade_bias": "long",
                 "previous_candle": previous_candle,
                 "current_candle": current_candle,
                 "middle_band": current_middle,
@@ -115,6 +117,7 @@ class FfFdStrategy(BaseStrategy):
         if sell_trigger:
             return {
                 "side": "sell",
+                "trade_bias": "short",
                 "previous_candle": previous_candle,
                 "current_candle": current_candle,
                 "middle_band": current_middle,
@@ -148,13 +151,15 @@ class FfFdStrategy(BaseStrategy):
         current_candle = pattern["current_candle"]
         middle_band = pattern["middle_band"]
         side = pattern["side"]
+        trade_bias = pattern["trade_bias"]
 
         if side == "buy":
             return TriggerDecision(
                 triggered=True,
                 reason="ff_fd_buy_confirmed",
                 metadata={
-                    "side": "buy",
+                    "side": side,
+                    "trade_bias": trade_bias,
                     "middle_band": str(middle_band),
                     "previous_close": str(previous_candle.close),
                     "current_close": str(current_candle.close),
@@ -165,7 +170,8 @@ class FfFdStrategy(BaseStrategy):
             triggered=True,
             reason="ff_fd_sell_confirmed",
             metadata={
-                "side": "sell",
+                "side": side,
+                "trade_bias": trade_bias,
                 "middle_band": str(middle_band),
                 "previous_close": str(previous_candle.close),
                 "current_close": str(current_candle.close),
@@ -187,11 +193,14 @@ class FfFdStrategy(BaseStrategy):
         current_candle = pattern["current_candle"]
         middle_band = pattern["middle_band"]
         side = pattern["side"]
+        trade_bias = pattern["trade_bias"]
 
         if side == "buy":
             invalidation_price = min(previous_candle.low, current_candle.low)
+            setup_type = "ff_fd_buy"
         else:
             invalidation_price = max(previous_candle.high, current_candle.high)
+            setup_type = "ff_fd_sell"
 
         timeout_bars = int(config.timeout_bars)
         timeout_at = None
@@ -199,6 +208,12 @@ class FfFdStrategy(BaseStrategy):
         if timeout_bars > 0:
             candle_duration = current_candle.close_time - current_candle.open_time
             timeout_at = current_candle.close_time + (candle_duration * timeout_bars)
+
+        snapshot = build_case_metadata_snapshot(
+            candles=candles,
+            index=index,
+            config=config,
+        )
 
         return StrategyCase(
             run_id=run.id or "run-placeholder",
@@ -215,12 +230,16 @@ class FfFdStrategy(BaseStrategy):
             timeout_at=timeout_at,
             metadata={
                 "strategy_key": self.definition.key,
+                "strategy_family": "mean_reversion",
+                "setup_type": setup_type,
                 "side": side,
+                "trade_bias": trade_bias,
                 "middle_band": str(middle_band),
                 "previous_candle_close": str(previous_candle.close),
                 "current_candle_close": str(current_candle.close),
                 "previous_candle_time": previous_candle.close_time.isoformat(),
                 "confirmation_candle_time": current_candle.close_time.isoformat(),
+                "analysis_snapshot": snapshot,
             },
         )
 
