@@ -25,7 +25,7 @@ git add . ; git commit -m "Descricao da alteracao" ; git push
 
 🚀 Passo 1: Aceder à pasta do projeto no servidor
 
-.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate
 uvicorn app.main:app --reload
 uvicorn app.main:app
 .\test_api.ps1

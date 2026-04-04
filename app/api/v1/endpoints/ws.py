@@ -6,24 +6,19 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 from uvicorn.protocols.utils import ClientDisconnected
 
+from app.services.candle_sync import CandleSyncService
+from app.storage.database import SessionLocal
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-TWELVEDATA_BASE_URL = "https://api.twelvedata.com/time_series"
-
-
-# ============================================================================
-# HELPERS
-# ============================================================================
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -54,6 +49,12 @@ def normalize_timeframe(value: Any) -> str:
     return aliases.get(normalized, normalized)
 
 
+def normalize_string_or_none(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def timeframe_to_provider_interval(timeframe: str) -> str:
     mapping = {
         "1m": "1min",
@@ -81,6 +82,23 @@ def default_window_for_timeframe(timeframe: str) -> timedelta:
     return timedelta(days=60)
 
 
+def refresh_poll_seconds_for_timeframe(timeframe: str) -> int:
+    normalized = normalize_timeframe(timeframe)
+
+    if normalized == "1m":
+        return 30
+    if normalized in {"3m", "5m"}:
+        return 60
+    if normalized in {"15m", "30m"}:
+        return 180
+    if normalized == "1h":
+        return 300
+    if normalized == "4h":
+        return 900
+
+    return 1800
+
+
 def extract_error_message(exc: Exception) -> str:
     text = str(exc).strip()
     return text or exc.__class__.__name__
@@ -90,196 +108,6 @@ def is_provider_rate_limit_error(exc: Exception) -> bool:
     message = extract_error_message(exc).lower()
     return "429" in message or "rate limit" in message or "api credits" in message
 
-
-def map_symbol_to_twelvedata(
-    *,
-    symbol: str,
-    market_type: str | None = None,
-    catalog: str | None = None,
-) -> str:
-    normalized_symbol = normalize_symbol(symbol)
-    market_type_value = (market_type or "").strip().lower()
-    catalog_value = (catalog or "").strip().lower()
-
-    if market_type_value == "forex":
-        if "/" in normalized_symbol:
-            return normalized_symbol
-        if len(normalized_symbol) == 6:
-            return f"{normalized_symbol[:3]}/{normalized_symbol[3:]}"
-        return normalized_symbol
-
-    if market_type_value in {"cripto", "crypto"}:
-        if catalog_value == "spot":
-            if normalized_symbol.endswith("USDT") and len(normalized_symbol) > 4:
-                base = normalized_symbol[:-4]
-                return f"{base}/USDT"
-            if normalized_symbol.endswith("USD") and len(normalized_symbol) > 3:
-                base = normalized_symbol[:-3]
-                return f"{base}/USD"
-        return normalized_symbol
-
-    return normalized_symbol
-
-
-def parse_twelvedata_datetime_to_iso(value: str) -> str:
-    raw = value.strip()
-
-    formats = [
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-    ]
-
-    for fmt in formats:
-        try:
-            parsed = datetime.strptime(raw, fmt)
-            parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.isoformat()
-        except ValueError:
-            continue
-
-    raise RuntimeError(f"Data inválida devolvida pela Twelve Data: {value}")
-
-
-def timeframe_to_timedelta(timeframe: str) -> timedelta:
-    normalized = normalize_timeframe(timeframe)
-
-    mapping = {
-        "1m": timedelta(minutes=1),
-        "3m": timedelta(minutes=3),
-        "5m": timedelta(minutes=5),
-        "15m": timedelta(minutes=15),
-        "30m": timedelta(minutes=30),
-        "1h": timedelta(hours=1),
-        "4h": timedelta(hours=4),
-        "1d": timedelta(days=1),
-    }
-
-    return mapping.get(normalized, timedelta(minutes=5))
-
-
-def build_close_time_iso(open_time_iso: str, timeframe: str) -> str:
-    parsed = datetime.fromisoformat(open_time_iso)
-    return (parsed + timeframe_to_timedelta(timeframe)).isoformat()
-
-
-def normalize_string_or_none(value: Any) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-# ============================================================================
-# PROVIDER
-# ============================================================================
-
-async def get_initial_candles_from_provider(
-    *,
-    symbol: str,
-    timeframe: str,
-    market_type: str | None = None,
-    catalog: str | None = None,
-    start_at: datetime | None = None,
-    end_at: datetime | None = None,
-) -> list[dict[str, Any]]:
-    api_key = os.getenv("TWELVEDATA_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("TWELVEDATA_API_KEY não configurada.")
-
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    provider_symbol = map_symbol_to_twelvedata(
-        symbol=normalized_symbol,
-        market_type=market_type,
-        catalog=catalog,
-    )
-    provider_interval = timeframe_to_provider_interval(normalized_timeframe)
-
-    params: dict[str, Any] = {
-        "symbol": provider_symbol,
-        "interval": provider_interval,
-        "apikey": api_key,
-        "format": "JSON",
-        "timezone": "UTC",
-        "order": "ASC",
-    }
-
-    if start_at:
-        params["start_date"] = start_at.strftime("%Y-%m-%d %H:%M:%S")
-    if end_at:
-        params["end_date"] = end_at.strftime("%Y-%m-%d %H:%M:%S")
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(TWELVEDATA_BASE_URL, params=params)
-
-    if response.status_code == 429:
-        raise RuntimeError(f"Twelve Data API error (429): {response.text}")
-
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"Twelve Data API error ({response.status_code}): {response.text}"
-        )
-
-    try:
-        payload = response.json()
-    except Exception as exc:
-        raise RuntimeError(f"Resposta JSON inválida da Twelve Data: {exc}") from exc
-
-    if isinstance(payload, dict) and payload.get("status") == "error":
-        code = payload.get("code")
-        message = payload.get("message") or "Erro desconhecido da Twelve Data."
-        raise RuntimeError(f"Twelve Data API error ({code}): {message}")
-
-    values = payload.get("values")
-    if not isinstance(values, list):
-        return []
-
-    candles: list[dict[str, Any]] = []
-
-    for index, item in enumerate(values):
-        if not isinstance(item, dict):
-            continue
-
-        dt_raw = item.get("datetime")
-        open_raw = item.get("open")
-        high_raw = item.get("high")
-        low_raw = item.get("low")
-        close_raw = item.get("close")
-        volume_raw = item.get("volume", "0")
-
-        if not isinstance(dt_raw, str):
-            continue
-
-        open_time_iso = parse_twelvedata_datetime_to_iso(dt_raw)
-        close_time_iso = build_close_time_iso(open_time_iso, normalized_timeframe)
-
-        candles.append(
-            {
-                "id": f"{normalized_symbol}-{normalized_timeframe}-{index}-{open_time_iso}",
-                "asset_id": None,
-                "symbol": normalized_symbol,
-                "timeframe": normalized_timeframe,
-                "open_time": open_time_iso,
-                "close_time": close_time_iso,
-                "open": str(open_raw or "0"),
-                "high": str(high_raw or "0"),
-                "low": str(low_raw or "0"),
-                "close": str(close_raw or "0"),
-                "volume": str(volume_raw or "0"),
-                "source": "twelvedata",
-                "provider": "twelvedata",
-                "market_session": None,
-                "timezone": "UTC",
-                "is_delayed": False,
-                "is_mock": False,
-            }
-        )
-
-    return candles
-
-
-# ============================================================================
-# SAFE WS HELPERS
-# ============================================================================
 
 async def safe_send_json(websocket: WebSocket, payload: dict[str, Any]) -> bool:
     try:
@@ -384,6 +212,38 @@ async def send_subscribed(
     )
 
 
+async def send_candles_refresh(
+    websocket: WebSocket,
+    *,
+    symbol: str,
+    timeframe: str,
+    market_type: str | None,
+    catalog: str | None,
+    count: int,
+    reason: str,
+    poll_seconds: int,
+    start_at: datetime,
+    end_at: datetime,
+) -> bool:
+    return await safe_send_json(
+        websocket,
+        {
+            "event": "candles_refresh",
+            "data": {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "market_type": market_type,
+                "catalog": catalog,
+                "count": count,
+                "reason": reason,
+                "poll_seconds": poll_seconds,
+                "start_at": start_at.replace(tzinfo=timezone.utc).isoformat(),
+                "end_at": end_at.replace(tzinfo=timezone.utc).isoformat(),
+            },
+        },
+    )
+
+
 async def heartbeat_loop(
     websocket: WebSocket,
     state: dict[str, Any],
@@ -415,9 +275,27 @@ async def heartbeat_loop(
         logger.debug("Heartbeat loop stopped: %s", exc)
 
 
-# ============================================================================
-# LOAD INITIAL CANDLES
-# ============================================================================
+def candle_to_ws_dict(candle) -> dict[str, Any]:
+    return {
+        "id": f"{candle.symbol}-{candle.timeframe}-{candle.open_time.isoformat()}",
+        "asset_id": candle.asset_id,
+        "symbol": candle.symbol,
+        "timeframe": candle.timeframe,
+        "open_time": candle.open_time.replace(tzinfo=timezone.utc).isoformat(),
+        "close_time": candle.close_time.replace(tzinfo=timezone.utc).isoformat(),
+        "open": str(candle.open),
+        "high": str(candle.high),
+        "low": str(candle.low),
+        "close": str(candle.close),
+        "volume": str(candle.volume),
+        "source": candle.source,
+        "provider": candle.source,
+        "market_session": None,
+        "timezone": "UTC",
+        "is_delayed": False,
+        "is_mock": False,
+    }
+
 
 async def load_and_send_initial_candles(
     websocket: WebSocket,
@@ -426,14 +304,9 @@ async def load_and_send_initial_candles(
     timeframe: str,
     market_type: str | None,
     catalog: str | None,
-) -> None:
+) -> bool:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    provider_symbol = map_symbol_to_twelvedata(
-        symbol=normalized_symbol,
-        market_type=market_type,
-        catalog=catalog,
-    )
 
     end_at = utc_now()
     start_at = end_at - default_window_for_timeframe(normalized_timeframe)
@@ -441,24 +314,29 @@ async def load_and_send_initial_candles(
 
     logger.info(
         {
-            "event": "twelvedata_request_debug",
-            "original_symbol": normalized_symbol,
-            "provider_symbol": provider_symbol,
+            "event": "sync_request_debug",
+            "symbol": normalized_symbol,
             "timeframe": normalized_timeframe,
+            "market_type": market_type,
+            "catalog": catalog,
             "interval": provider_interval,
             "start_at": start_at.isoformat(),
             "end_at": end_at.isoformat(),
         }
     )
 
+    session = SessionLocal()
+    service = CandleSyncService()
+
     try:
-        candles = await get_initial_candles_from_provider(
+        result = service.get_or_sync_candles(
+            session=session,
             symbol=normalized_symbol,
             timeframe=normalized_timeframe,
-            market_type=market_type,
-            catalog=catalog,
             start_at=start_at,
             end_at=end_at,
+            market_type=market_type,
+            catalog=catalog,
         )
 
         logger.info(
@@ -467,11 +345,19 @@ async def load_and_send_initial_candles(
                 "status": "ok",
                 "symbol": normalized_symbol,
                 "timeframe": normalized_timeframe,
-                "start_at": start_at.isoformat(),
-                "end_at": end_at.isoformat(),
-                "count": len(candles),
+                "source": result.source,
+                "cache_hit": result.cache_hit,
+                "db_hit": result.db_hit,
+                "provider_hit": result.provider_hit,
+                "missing_filled": result.missing_filled,
+                "newly_persisted_count": result.newly_persisted_count,
+                "count": len(result.candles),
+                "start_at": result.requested_start_at.isoformat(),
+                "end_at": result.requested_end_at.isoformat(),
             }
         )
+
+        payload_candles = [candle_to_ws_dict(item) for item in result.candles]
 
         sent = await send_initial_candles(
             websocket,
@@ -479,12 +365,10 @@ async def load_and_send_initial_candles(
             timeframe=normalized_timeframe,
             market_type=market_type,
             catalog=catalog,
-            candles=candles,
+            candles=payload_candles,
         )
 
-        if not sent:
-            logger.info("Initial candles not sent because client disconnected")
-            return
+        return bool(sent)
 
     except Exception as exc:
         error_message = extract_error_message(exc)
@@ -501,6 +385,14 @@ async def load_and_send_initial_candles(
             }
         )
 
+        if is_provider_rate_limit_error(exc):
+            service.notify_rate_limit(cooldown_seconds=300)
+            logger.warning(
+                "Provider rate limit reached for %s / %s",
+                normalized_symbol,
+                normalized_timeframe,
+            )
+
         await send_provider_error(
             websocket,
             symbol=normalized_symbol,
@@ -509,18 +401,99 @@ async def load_and_send_initial_candles(
             catalog=catalog,
             message=error_message,
         )
+        return False
 
-        if is_provider_rate_limit_error(exc):
-            logger.warning(
-                "Provider rate limit reached for %s / %s",
-                normalized_symbol,
-                normalized_timeframe,
-            )
+    finally:
+        session.close()
 
 
-# ============================================================================
-# ENDPOINT
-# ============================================================================
+async def incremental_refresh_loop(
+    websocket: WebSocket,
+    state: dict[str, Any],
+) -> None:
+    try:
+        while True:
+            symbol = normalize_symbol(state.get("symbol"))
+            timeframe = normalize_timeframe(state.get("timeframe"))
+            market_type = normalize_string_or_none(state.get("market_type"))
+            catalog = normalize_string_or_none(state.get("catalog"))
+
+            if not symbol or not timeframe:
+                await asyncio.sleep(2)
+                continue
+
+            poll_seconds = refresh_poll_seconds_for_timeframe(timeframe)
+            await asyncio.sleep(poll_seconds)
+
+            end_at = utc_now()
+            start_at = end_at - default_window_for_timeframe(timeframe)
+
+            session = SessionLocal()
+            service = CandleSyncService()
+
+            try:
+                result = service.get_or_sync_candles(
+                    session=session,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_at=start_at,
+                    end_at=end_at,
+                    market_type=market_type,
+                    catalog=catalog,
+                )
+
+                if result.newly_persisted_count > 0:
+                    sent = await send_candles_refresh(
+                        websocket,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        market_type=market_type,
+                        catalog=catalog,
+                        count=result.newly_persisted_count,
+                        reason="reload_incremental_sync",
+                        poll_seconds=poll_seconds,
+                        start_at=result.requested_start_at,
+                        end_at=result.requested_end_at,
+                    )
+                    if not sent:
+                        return
+
+                    logger.info(
+                        {
+                            "event": "candles_refresh_debug",
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "newly_persisted_count": result.newly_persisted_count,
+                            "poll_seconds": poll_seconds,
+                            "source": result.source,
+                        }
+                    )
+
+            except Exception as exc:
+                error_message = extract_error_message(exc)
+
+                if is_provider_rate_limit_error(exc):
+                    service.notify_rate_limit(cooldown_seconds=300)
+
+                sent = await send_provider_error(
+                    websocket,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    market_type=market_type,
+                    catalog=catalog,
+                    message=error_message,
+                )
+                if not sent:
+                    return
+
+            finally:
+                session.close()
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.debug("Incremental refresh loop stopped: %s", exc)
+
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
@@ -532,6 +505,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     }
 
     heartbeat_task: asyncio.Task[Any] | None = None
+    refresh_task: asyncio.Task[Any] | None = None
     accepted = False
 
     try:
@@ -663,6 +637,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             connection_state["market_type"] = market_type
             connection_state["catalog"] = catalog
 
+            if refresh_task:
+                refresh_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await refresh_task
+                refresh_task = None
+
             subscribed = await send_subscribed(
                 websocket,
                 symbol=symbol,
@@ -674,12 +654,18 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             if not subscribed:
                 return
 
-            await load_and_send_initial_candles(
+            initial_sent = await load_and_send_initial_candles(
                 websocket,
                 symbol=symbol,
                 timeframe=timeframe,
                 market_type=market_type,
                 catalog=catalog,
+            )
+            if not initial_sent:
+                return
+
+            refresh_task = asyncio.create_task(
+                incremental_refresh_loop(websocket, connection_state)
             )
 
     except WebSocketDisconnect:
@@ -732,6 +718,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             )
 
     finally:
+        if refresh_task:
+            refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await refresh_task
+
         if heartbeat_task:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
