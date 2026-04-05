@@ -55,6 +55,30 @@ def normalize_string_or_none(value: Any) -> str | None:
     return None
 
 
+def normalize_market_type(value: Any) -> str | None:
+    normalized = normalize_string_or_none(value)
+    if normalized is None:
+        return None
+    return normalized.strip().lower()
+
+
+def normalize_catalog(value: Any) -> str | None:
+    normalized = normalize_string_or_none(value)
+    if normalized is None:
+        return None
+    return normalized.strip().lower()
+
+
+def should_skip_provider_sync(
+    market_type: str | None,
+    catalog: str | None,
+) -> bool:
+    normalized_market_type = normalize_market_type(market_type)
+    normalized_catalog = normalize_catalog(catalog)
+
+    return normalized_market_type == "crypto" and normalized_catalog == "spot"
+
+
 def timeframe_to_provider_interval(timeframe: str) -> str:
     mapping = {
         "1m": "1min",
@@ -307,6 +331,8 @@ async def load_and_send_initial_candles(
 ) -> bool:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
+    normalized_market_type = normalize_market_type(market_type)
+    normalized_catalog = normalize_catalog(catalog)
 
     end_at = utc_now()
     start_at = end_at - default_window_for_timeframe(normalized_timeframe)
@@ -317,13 +343,29 @@ async def load_and_send_initial_candles(
             "event": "sync_request_debug",
             "symbol": normalized_symbol,
             "timeframe": normalized_timeframe,
-            "market_type": market_type,
-            "catalog": catalog,
+            "market_type": normalized_market_type,
+            "catalog": normalized_catalog,
             "interval": provider_interval,
             "start_at": start_at.isoformat(),
             "end_at": end_at.isoformat(),
         }
     )
+
+    if should_skip_provider_sync(normalized_market_type, normalized_catalog):
+        logger.info(
+            {
+                "event": "initial_candles_debug",
+                "status": "skipped",
+                "symbol": normalized_symbol,
+                "timeframe": normalized_timeframe,
+                "market_type": normalized_market_type,
+                "catalog": normalized_catalog,
+                "reason": "crypto_spot_sync_disabled_for_provider",
+                "start_at": start_at.isoformat(),
+                "end_at": end_at.isoformat(),
+            }
+        )
+        return True
 
     session = SessionLocal()
     service = CandleSyncService()
@@ -335,8 +377,8 @@ async def load_and_send_initial_candles(
             timeframe=normalized_timeframe,
             start_at=start_at,
             end_at=end_at,
-            market_type=market_type,
-            catalog=catalog,
+            market_type=normalized_market_type,
+            catalog=normalized_catalog,
         )
 
         logger.info(
@@ -363,8 +405,8 @@ async def load_and_send_initial_candles(
             websocket,
             symbol=normalized_symbol,
             timeframe=normalized_timeframe,
-            market_type=market_type,
-            catalog=catalog,
+            market_type=normalized_market_type,
+            catalog=normalized_catalog,
             candles=payload_candles,
         )
 
@@ -397,8 +439,8 @@ async def load_and_send_initial_candles(
             websocket,
             symbol=normalized_symbol,
             timeframe=normalized_timeframe,
-            market_type=market_type,
-            catalog=catalog,
+            market_type=normalized_market_type,
+            catalog=normalized_catalog,
             message=error_message,
         )
         return False
@@ -415,8 +457,8 @@ async def incremental_refresh_loop(
         while True:
             symbol = normalize_symbol(state.get("symbol"))
             timeframe = normalize_timeframe(state.get("timeframe"))
-            market_type = normalize_string_or_none(state.get("market_type"))
-            catalog = normalize_string_or_none(state.get("catalog"))
+            market_type = normalize_market_type(state.get("market_type"))
+            catalog = normalize_catalog(state.get("catalog"))
 
             if not symbol or not timeframe:
                 await asyncio.sleep(2)
@@ -424,6 +466,21 @@ async def incremental_refresh_loop(
 
             poll_seconds = refresh_poll_seconds_for_timeframe(timeframe)
             await asyncio.sleep(poll_seconds)
+
+            if should_skip_provider_sync(market_type, catalog):
+                logger.debug(
+                    {
+                        "event": "candles_refresh_debug",
+                        "status": "skipped",
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "market_type": market_type,
+                        "catalog": catalog,
+                        "reason": "crypto_spot_sync_disabled_for_provider",
+                        "poll_seconds": poll_seconds,
+                    }
+                )
+                continue
 
             end_at = utc_now()
             start_at = end_at - default_window_for_timeframe(timeframe)
@@ -605,8 +662,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
             symbol = normalize_symbol(payload.get("symbol"))
             timeframe = normalize_timeframe(payload.get("timeframe"))
-            market_type = normalize_string_or_none(payload.get("market_type"))
-            catalog = normalize_string_or_none(payload.get("catalog"))
+            market_type = normalize_market_type(payload.get("market_type"))
+            catalog = normalize_catalog(payload.get("catalog"))
 
             logger.info(
                 {

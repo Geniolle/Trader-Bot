@@ -1,18 +1,46 @@
 # app/providers/twelvedata.py
 
 import json
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import datetime, timedelta
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from app.core.logging import get_logger
 from app.core.settings import get_settings
 from app.models.domain.candle import Candle
 from app.providers.base import BaseMarketDataProvider
 
+logger = get_logger(__name__)
+
 
 class TwelveDataProvider(BaseMarketDataProvider):
+    _FIAT_CODES = {
+        "USD",
+        "EUR",
+        "GBP",
+        "JPY",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "BRL",
+        "MXN",
+        "SEK",
+        "NOK",
+        "DKK",
+        "ZAR",
+        "HKD",
+        "SGD",
+        "TRY",
+        "PLN",
+        "CZK",
+        "HUF",
+        "RON",
+    }
+
     def __init__(self) -> None:
         self.settings = get_settings()
 
@@ -32,14 +60,11 @@ class TwelveDataProvider(BaseMarketDataProvider):
         interval = self._map_timeframe_to_interval(timeframe)
         provider_symbol = self._normalize_symbol_for_twelvedata(symbol)
 
-        normalized_start = self._normalize_datetime(start_at)
-        normalized_end = self._normalize_datetime(end_at)
-
         params = {
             "symbol": provider_symbol,
             "interval": interval,
-            "start_date": normalized_start.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_date": normalized_end.strftime("%Y-%m-%d %H:%M:%S"),
+            "start_date": start_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_date": end_at.strftime("%Y-%m-%d %H:%M:%S"),
             "outputsize": 5000,
             "order": "asc",
             "format": "JSON",
@@ -47,15 +72,15 @@ class TwelveDataProvider(BaseMarketDataProvider):
 
         url = f"{self.settings.twelvedata_base_url}/time_series?{urlencode(params)}"
 
-        print(
+        logger.info(
             {
                 "event": "twelvedata_request_debug",
                 "original_symbol": symbol,
                 "provider_symbol": provider_symbol,
                 "timeframe": timeframe,
                 "interval": interval,
-                "start_at": normalized_start.isoformat(),
-                "end_at": normalized_end.isoformat(),
+                "start_at": start_at.isoformat(),
+                "end_at": end_at.isoformat(),
             }
         )
 
@@ -104,7 +129,6 @@ class TwelveDataProvider(BaseMarketDataProvider):
             raise ValueError("Unexpected Twelve Data response format")
 
         candles: list[Candle] = []
-
         for item in values:
             close_time = self._parse_twelvedata_datetime(item["datetime"])
             open_time = self._infer_open_time(close_time, timeframe)
@@ -126,58 +150,34 @@ class TwelveDataProvider(BaseMarketDataProvider):
 
         return candles
 
-    def _normalize_datetime(self, value: datetime) -> datetime:
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
-
     def _normalize_symbol_for_twelvedata(self, symbol: str) -> str:
-        normalized = symbol.strip().upper()
+        normalized = (symbol or "").strip().upper()
 
         if not normalized:
+            raise ValueError("Symbol is empty for Twelve Data request")
+
+        if re.fullmatch(r"[A-Z0-9]+", normalized):
             return normalized
 
-        if "/" in normalized:
-            return normalized
+        parts = [part for part in re.split(r"[^A-Z0-9]+", normalized) if part]
 
-        if normalized.endswith(".P"):
-            return normalized
+        if len(parts) == 2:
+            base, quote = parts
 
-        forex_currencies = {
-            "USD",
-            "EUR",
-            "GBP",
-            "JPY",
-            "CHF",
-            "AUD",
-            "CAD",
-            "NZD",
-        }
+            if self._is_forex_pair(base, quote):
+                return f"{base}/{quote}"
 
-        if len(normalized) == 6:
-            base_asset = normalized[:3]
-            quote_asset = normalized[3:]
-
-            if base_asset in forex_currencies and quote_asset in forex_currencies:
-                return f"{base_asset}/{quote_asset}"
-
-        crypto_quotes = [
-            "USDT",
-            "USDC",
-            "USD",
-            "BTC",
-            "ETH",
-            "EUR",
-        ]
-
-        for quote in crypto_quotes:
-            if normalized.endswith(quote) and len(normalized) > len(quote):
-                base_asset = normalized[: -len(quote)]
-
-                if base_asset and base_asset.isalnum():
-                    return f"{base_asset}/{quote}"
+            return f"{base}{quote}"
 
         return normalized
+
+    def _is_forex_pair(self, base: str, quote: str) -> bool:
+        return (
+            len(base) == 3
+            and len(quote) == 3
+            and base in self._FIAT_CODES
+            and quote in self._FIAT_CODES
+        )
 
     def _map_timeframe_to_interval(self, timeframe: str) -> str:
         mapping = {
@@ -190,18 +190,14 @@ class TwelveDataProvider(BaseMarketDataProvider):
             "2h": "2h",
             "4h": "4h",
             "1d": "1day",
-            "1day": "1day",
             "1w": "1week",
-            "1week": "1week",
             "1mo": "1month",
-            "1month": "1month",
         }
 
-        interval = mapping.get(timeframe.strip().lower())
-        if interval is None:
+        if timeframe not in mapping:
             raise ValueError(f"Unsupported timeframe for Twelve Data: {timeframe}")
 
-        return interval
+        return mapping[timeframe]
 
     def _parse_twelvedata_datetime(self, value: str) -> datetime:
         formats = [
@@ -211,37 +207,34 @@ class TwelveDataProvider(BaseMarketDataProvider):
 
         for fmt in formats:
             try:
-                parsed = datetime.strptime(value, fmt)
-                return parsed.replace(tzinfo=timezone.utc)
+                return datetime.strptime(value, fmt)
             except ValueError:
                 continue
 
         raise ValueError(f"Unsupported datetime format from Twelve Data: {value}")
 
     def _infer_open_time(self, close_time: datetime, timeframe: str) -> datetime:
-        normalized = timeframe.strip().lower()
-
-        if normalized == "1m":
+        if timeframe == "1m":
             return close_time - timedelta(minutes=1)
-        if normalized == "5m":
+        if timeframe == "5m":
             return close_time - timedelta(minutes=5)
-        if normalized == "15m":
+        if timeframe == "15m":
             return close_time - timedelta(minutes=15)
-        if normalized == "30m":
+        if timeframe == "30m":
             return close_time - timedelta(minutes=30)
-        if normalized == "45m":
+        if timeframe == "45m":
             return close_time - timedelta(minutes=45)
-        if normalized == "1h":
+        if timeframe == "1h":
             return close_time - timedelta(hours=1)
-        if normalized == "2h":
+        if timeframe == "2h":
             return close_time - timedelta(hours=2)
-        if normalized == "4h":
+        if timeframe == "4h":
             return close_time - timedelta(hours=4)
-        if normalized in ("1d", "1day"):
+        if timeframe == "1d":
             return close_time - timedelta(days=1)
-        if normalized in ("1w", "1week"):
+        if timeframe == "1w":
             return close_time - timedelta(weeks=1)
-        if normalized in ("1mo", "1month"):
+        if timeframe == "1mo":
             return close_time - timedelta(days=30)
 
         raise ValueError(f"Unsupported timeframe for open_time inference: {timeframe}")
