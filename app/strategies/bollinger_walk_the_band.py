@@ -1,4 +1,4 @@
-# app/strategies/bollinger_reversal.py
+# app/strategies/bollinger_walk_the_band.py
 
 from decimal import Decimal
 
@@ -13,18 +13,17 @@ from app.strategies.base import BaseStrategy
 from app.strategies.decisions import CaseCloseDecision, TriggerDecision
 
 
-class BollingerReversalStrategy(BaseStrategy):
+class BollingerWalkTheBandStrategy(BaseStrategy):
     definition = StrategyDefinition(
-        key="bollinger_reversal",
-        name="Bollinger Reversal",
-        version="2.0.0",
+        key="bollinger_walk_the_band",
+        name="Bollinger Walk The Band",
+        version="1.0.0",
         description=(
-            "Detecta reversão por Bollinger em ambos os lados: "
-            "fechou fora da banda e o candle seguinte fechou novamente dentro. "
-            "O alvo é a média (middle band) e a invalidação fica no extremo "
-            "do candle de confirmação."
+            "Detecta continuação quando o candle fecha na banda externa. "
+            "A estratégia opera continuação na direção da banda, usa a middle "
+            "band como invalidação estrutural e projeta alvo por múltiplo de risco."
         ),
-        category=StrategyCategory.MEAN_REVERSION,
+        category=StrategyCategory.TREND_FOLLOWING,
     )
 
     def warmup_period(self, config: StrategyConfig) -> int:
@@ -67,74 +66,42 @@ class BollingerReversalStrategy(BaseStrategy):
         index: int,
         config: StrategyConfig,
     ) -> TriggerDecision:
-        if index < 1:
-            return TriggerDecision(
-                triggered=False,
-                reason="not_enough_candles_for_confirmation",
-            )
-
-        previous_slice = candles[:index]
         current_slice = candles[: index + 1]
+        indicators = self.calculate_indicators(current_slice, config)
 
-        previous_indicators = self.calculate_indicators(previous_slice, config)
-        current_indicators = self.calculate_indicators(current_slice, config)
+        lower_band = indicators["lower_band"]
+        middle_band = indicators["middle_band"]
+        upper_band = indicators["upper_band"]
 
-        previous_lower = previous_indicators["lower_band"]
-        previous_upper = previous_indicators["upper_band"]
-        current_lower = current_indicators["lower_band"]
-        current_middle = current_indicators["middle_band"]
-        current_upper = current_indicators["upper_band"]
-
-        if (
-            previous_lower is None
-            or previous_upper is None
-            or current_lower is None
-            or current_middle is None
-            or current_upper is None
-        ):
+        if lower_band is None or middle_band is None or upper_band is None:
             return TriggerDecision(
                 triggered=False,
                 reason="indicators_not_ready",
             )
 
-        previous_candle = candles[index - 1]
         current_candle = candles[index]
 
-        previous_closed_above_upper = previous_candle.close > previous_upper
-        current_closed_back_inside_from_above = current_candle.close < current_upper
-
-        if previous_closed_above_upper and current_closed_back_inside_from_above:
+        if current_candle.close >= upper_band:
             return TriggerDecision(
                 triggered=True,
-                reason="bollinger_reversal_short_confirmed",
+                reason="bollinger_walk_upper_band_long_confirmed",
                 metadata={
-                    "direction": "short",
-                    "previous_upper_band": str(previous_upper),
-                    "current_upper_band": str(current_upper),
-                    "middle_band": str(current_middle),
-                    "previous_close": str(previous_candle.close),
-                    "current_close": str(current_candle.close),
-                    "confirmation_high": str(current_candle.high),
-                    "confirmation_low": str(current_candle.low),
+                    "direction": "long",
+                    "upper_band": str(upper_band),
+                    "middle_band": str(middle_band),
+                    "close": str(current_candle.close),
                 },
             )
 
-        previous_closed_below_lower = previous_candle.close < previous_lower
-        current_closed_back_inside_from_below = current_candle.close > current_lower
-
-        if previous_closed_below_lower and current_closed_back_inside_from_below:
+        if current_candle.close <= lower_band:
             return TriggerDecision(
                 triggered=True,
-                reason="bollinger_reversal_long_confirmed",
+                reason="bollinger_walk_lower_band_short_confirmed",
                 metadata={
-                    "direction": "long",
-                    "previous_lower_band": str(previous_lower),
-                    "current_lower_band": str(current_lower),
-                    "middle_band": str(current_middle),
-                    "previous_close": str(previous_candle.close),
-                    "current_close": str(current_candle.close),
-                    "confirmation_high": str(current_candle.high),
-                    "confirmation_low": str(current_candle.low),
+                    "direction": "short",
+                    "lower_band": str(lower_band),
+                    "middle_band": str(middle_band),
+                    "close": str(current_candle.close),
                 },
             )
 
@@ -163,6 +130,10 @@ class BollingerReversalStrategy(BaseStrategy):
         if middle_band is None:
             raise ValueError("middle_band is required to create a case")
 
+        risk_reward = Decimal(str(config.parameters.get("risk_reward", "1.5")))
+        if risk_reward <= 0:
+            raise ValueError("risk_reward must be greater than zero")
+
         timeout_bars = int(config.timeout_bars)
         timeout_at = None
 
@@ -170,16 +141,22 @@ class BollingerReversalStrategy(BaseStrategy):
             candle_duration = current_candle.close_time - current_candle.open_time
             timeout_at = current_candle.close_time + (candle_duration * timeout_bars)
 
-        if direction == "short":
-            entry_price = current_candle.low
-            target_price = middle_band
-            invalidation_price = current_candle.high
-        elif direction == "long":
-            entry_price = current_candle.high
-            target_price = middle_band
-            invalidation_price = current_candle.low
+        entry_price = current_candle.close
+
+        if direction == "long":
+            invalidation_price = middle_band
+            risk = entry_price - invalidation_price
+            if risk <= 0:
+                raise ValueError("invalid long risk for bollinger walk the band")
+            target_price = entry_price + (risk * risk_reward)
+        elif direction == "short":
+            invalidation_price = middle_band
+            risk = invalidation_price - entry_price
+            if risk <= 0:
+                raise ValueError("invalid short risk for bollinger walk the band")
+            target_price = entry_price - (risk * risk_reward)
         else:
-            raise ValueError("invalid bollinger reversal direction")
+            raise ValueError("invalid bollinger walk the band direction")
 
         return StrategyCase(
             run_id=run.id or "run-placeholder",
@@ -198,8 +175,7 @@ class BollingerReversalStrategy(BaseStrategy):
                 "strategy_key": self.definition.key,
                 "direction": direction,
                 "middle_band": str(middle_band),
-                "confirmation_candle_high": str(current_candle.high),
-                "confirmation_candle_low": str(current_candle.low),
+                "risk_reward": str(risk_reward),
             },
         )
 
@@ -212,12 +188,12 @@ class BollingerReversalStrategy(BaseStrategy):
         updated_case = case.model_copy(deep=True)
         direction = str(updated_case.metadata.get("direction", "")).lower()
 
-        if direction == "short":
-            favorable_move = updated_case.entry_price - candle.low
-            adverse_move = candle.high - updated_case.entry_price
-        else:
+        if direction == "long":
             favorable_move = candle.high - updated_case.entry_price
             adverse_move = updated_case.entry_price - candle.low
+        else:
+            favorable_move = updated_case.entry_price - candle.low
+            adverse_move = candle.high - updated_case.entry_price
 
         if favorable_move > updated_case.max_favorable_excursion:
             updated_case.max_favorable_excursion = favorable_move
@@ -237,12 +213,12 @@ class BollingerReversalStrategy(BaseStrategy):
     ) -> CaseCloseDecision:
         direction = str(case.metadata.get("direction", "")).lower()
 
-        if direction == "short":
-            stop_hit = candle.high >= case.invalidation_price
-            target_hit = candle.low <= case.target_price
-        else:
+        if direction == "long":
             stop_hit = candle.low <= case.invalidation_price
             target_hit = candle.high >= case.target_price
+        else:
+            stop_hit = candle.high >= case.invalidation_price
+            target_hit = candle.low <= case.target_price
 
         if stop_hit and target_hit:
             return CaseCloseDecision(
@@ -256,7 +232,7 @@ class BollingerReversalStrategy(BaseStrategy):
             return CaseCloseDecision(
                 should_close=True,
                 outcome=CaseOutcome.HIT,
-                reason="target_hit_middle_band",
+                reason="target_hit_projected_rr",
                 close_price=case.target_price,
             )
 
@@ -264,7 +240,7 @@ class BollingerReversalStrategy(BaseStrategy):
             return CaseCloseDecision(
                 should_close=True,
                 outcome=CaseOutcome.FAIL,
-                reason="invalidation_hit_confirmation_extreme",
+                reason="invalidation_hit_middle_band",
                 close_price=case.invalidation_price,
             )
 

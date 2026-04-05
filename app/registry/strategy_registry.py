@@ -1,7 +1,9 @@
+# app/registry/strategy_registry.py
+
 from app.strategies.base import BaseStrategy
 from app.strategies.bollinger_reversal import BollingerReversalStrategy
+from app.strategies.bollinger_walk_the_band import BollingerWalkTheBandStrategy
 from app.strategies.ema_cross import EmaCrossStrategy
-from app.strategies.ff_fd import FfFdStrategy
 from app.strategies.rsi_reversal import RsiReversalStrategy
 
 
@@ -38,7 +40,7 @@ class StrategyRegistry:
 def build_strategy_registry() -> StrategyRegistry:
     registry = StrategyRegistry()
     registry.register(BollingerReversalStrategy())
+    registry.register(BollingerWalkTheBandStrategy())
     registry.register(EmaCrossStrategy())
-    registry.register(FfFdStrategy())
     registry.register(RsiReversalStrategy())
     return registry
