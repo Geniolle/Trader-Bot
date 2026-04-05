@@ -1,6 +1,6 @@
 # app/services/case_snapshot.py
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 
 from app.indicators.atr import average_true_range_series
 from app.indicators.bollinger import bollinger_bands
@@ -28,8 +28,8 @@ def build_case_metadata_snapshot(
 
     closes = [candle.close for candle in current_slice]
 
-    ema_values = {}
-    ema_previous_values = {}
+    ema_values: dict[int, Decimal | None] = {}
+    ema_previous_values: dict[int, Decimal | None] = {}
 
     for period in EMA_PERIODS:
         current_series = exponential_moving_average_series(closes, period)
@@ -54,12 +54,24 @@ def build_case_metadata_snapshot(
     previous_rsi = rsi_series[-2] if len(rsi_series) >= 2 else None
 
     macd_values = macd_series(closes, fast_period=12, slow_period=26, signal_period=9)
-    current_macd = macd_values[-1] if macd_values else {"macd_line": None, "signal_line": None, "histogram": None}
-    previous_macd = macd_values[-2] if len(macd_values) >= 2 else {"macd_line": None, "signal_line": None, "histogram": None}
+    current_macd = (
+        macd_values[-1]
+        if macd_values
+        else {"macd_line": None, "signal_line": None, "histogram": None}
+    )
+    previous_macd = (
+        macd_values[-2]
+        if len(macd_values) >= 2
+        else {"macd_line": None, "signal_line": None, "histogram": None}
+    )
 
     atr_period = int(config.parameters.get("atr_period", 14))
     atr_series = average_true_range_series(current_slice, atr_period)
     current_atr = atr_series[-1] if atr_series else None
+
+    adx_period = int(config.parameters.get("adx_period", 14))
+    adx_series = average_directional_index_series(current_slice, adx_period)
+    current_adx = adx_series[-1] if adx_series else None
 
     lower_band = middle_band = upper_band = None
     previous_lower = previous_middle = previous_upper = None
@@ -82,6 +94,16 @@ def build_case_metadata_snapshot(
 
     price_vs_ema_20 = classify_price_vs_average(current_candle.close, ema_values.get(20))
     price_vs_ema_40 = classify_price_vs_average(current_candle.close, ema_values.get(40))
+
+    vwap_value = calculate_vwap(current_slice)
+    price_vs_vwap = classify_price_vs_average(current_candle.close, vwap_value)
+    vwap_state = price_vs_vwap
+
+    volume_window = current_slice[-20:]
+    volume_ratio = calculate_volume_ratio(volume_window)
+    volume_zscore = calculate_volume_zscore(volume_window)
+    volume_signal = classify_volume_signal(volume_ratio)
+    volume_context = classify_volume_context(volume_ratio)
 
     trend_confirmed_long = (
         ema_alignment == "bullish"
@@ -121,8 +143,33 @@ def build_case_metadata_snapshot(
     if current_atr is not None and current_atr > 0:
         candle_range_vs_atr = candle_range / current_atr
 
+    bollinger_z_score = calculate_bollinger_z_score(
+        close=current_candle.close,
+        middle_band=middle_band,
+        upper_band=upper_band,
+        stddev_multiplier=bollinger_stddev,
+    )
+
+    distance_outside_band = calculate_distance_outside_band(
+        close=current_candle.close,
+        lower_band=lower_band,
+        upper_band=upper_band,
+        middle_band=middle_band,
+        stddev_multiplier=bollinger_stddev,
+    )
+
+    distance_from_band = calculate_distance_from_nearest_band(
+        close=current_candle.close,
+        lower_band=lower_band,
+        upper_band=upper_band,
+        middle_band=middle_band,
+        stddev_multiplier=bollinger_stddev,
+    )
+
+    band_distance_ratio = distance_outside_band
+
     snapshot = {
-        "snapshot_version": "1.0",
+        "snapshot_version": "1.1",
         "trigger_context": {
             "reference_time": current_candle.close_time.isoformat(),
             "reference_price": as_str(current_candle.close),
@@ -139,6 +186,10 @@ def build_case_metadata_snapshot(
             "ema_alignment": ema_alignment,
             "price_vs_ema_20": price_vs_ema_20,
             "price_vs_ema_40": price_vs_ema_40,
+            "price_vs_vwap": price_vs_vwap,
+            "vwap_state": vwap_state,
+            "adx": as_str(current_adx),
+            "adx_14": as_str(current_adx),
             "ema_5_slope": slope_label(ema_values.get(5), ema_previous_values.get(5)),
             "ema_10_slope": slope_label(ema_values.get(10), ema_previous_values.get(10)),
             "ema_20_slope": slope_label(ema_values.get(20), ema_previous_values.get(20)),
@@ -151,10 +202,19 @@ def build_case_metadata_snapshot(
             "upper": as_str(upper_band),
             "middle": as_str(middle_band),
             "lower": as_str(lower_band),
-            "bandwidth": as_str((upper_band - lower_band) if upper_band is not None and lower_band is not None else None),
+            "bandwidth": as_str(
+                (upper_band - lower_band)
+                if upper_band is not None and lower_band is not None
+                else None
+            ),
             "close_position_in_band": as_str(
                 calculate_band_position(current_candle.close, lower_band, upper_band)
             ),
+            "z_score": as_str(bollinger_z_score),
+            "zscore": as_str(bollinger_z_score),
+            "distance_from_band": as_str(distance_from_band),
+            "distance_outside_band": as_str(distance_outside_band),
+            "band_distance_ratio": as_str(band_distance_ratio),
             "closed_below_lower_band": closed_below_lower_band,
             "closed_above_upper_band": closed_above_upper_band,
             "reentered_inside_band_long": reentered_inside_band_long,
@@ -172,6 +232,8 @@ def build_case_metadata_snapshot(
                 current_macd.get("histogram"),
                 previous_macd.get("histogram"),
             ),
+            "volume_signal": volume_signal,
+            "volume_ratio": as_str(volume_ratio),
         },
         "volatility": {
             "atr_14": as_str(current_atr),
@@ -192,6 +254,9 @@ def build_case_metadata_snapshot(
             "distance_to_recent_resistance": as_str(distance_to_recent_resistance(current_slice)),
             "distance_to_ema_20": as_str(distance_to_level(current_candle.close, ema_values.get(20))),
             "distance_to_ema_40": as_str(distance_to_level(current_candle.close, ema_values.get(40))),
+            "price_vs_vwap": price_vs_vwap,
+            "adx": as_str(current_adx),
+            "adx_14": as_str(current_adx),
         },
         "trigger_candle": candle_stats,
         "patterns": {
@@ -215,6 +280,19 @@ def build_case_metadata_snapshot(
             "macd_confirmation_short": macd_state in {"bearish_cross", "bearish_below_signal"},
             "countertrend_long": not trend_confirmed_long,
             "countertrend_short": not trend_confirmed_short,
+        },
+        "volume": {
+            "signal": volume_signal,
+            "context": volume_context,
+            "relative_state": volume_signal,
+            "relative_volume": as_str(volume_ratio),
+            "ratio": as_str(volume_ratio),
+            "zscore": as_str(volume_zscore),
+        },
+        "vwap": {
+            "value": as_str(vwap_value),
+            "state": vwap_state,
+            "signal": vwap_state,
         },
     }
 
@@ -496,3 +574,265 @@ def classify_atr_regime(
         return "high"
 
     return "normal"
+
+
+def calculate_vwap(candles: list[Candle]) -> Decimal | None:
+    if not candles:
+        return None
+
+    cumulative_tp_volume = Decimal("0")
+    cumulative_volume = Decimal("0")
+
+    for candle in candles:
+        volume = candle.volume if candle.volume is not None else Decimal("0")
+        typical_price = (candle.high + candle.low + candle.close) / Decimal("3")
+        cumulative_tp_volume += typical_price * volume
+        cumulative_volume += volume
+
+    if cumulative_volume <= 0:
+        return None
+
+    return cumulative_tp_volume / cumulative_volume
+
+
+def calculate_volume_ratio(candles: list[Candle]) -> Decimal | None:
+    if not candles:
+        return None
+
+    current_volume = candles[-1].volume if candles[-1].volume is not None else Decimal("0")
+    baseline_source = candles[-20:-1] if len(candles) > 1 else candles[-20:]
+    volumes = [
+        candle.volume
+        for candle in baseline_source
+        if candle.volume is not None
+    ]
+
+    if not volumes:
+        return None
+
+    baseline = sum(volumes) / Decimal(len(volumes))
+    if baseline == 0:
+        return None
+
+    return current_volume / baseline
+
+
+def calculate_volume_zscore(candles: list[Candle]) -> Decimal | None:
+    if not candles:
+        return None
+
+    current_volume = candles[-1].volume if candles[-1].volume is not None else Decimal("0")
+    baseline_source = candles[-20:-1] if len(candles) > 1 else candles[-20:]
+    values = [
+        candle.volume
+        for candle in baseline_source
+        if candle.volume is not None
+    ]
+
+    if len(values) < 2:
+        return None
+
+    mean_value = sum(values) / Decimal(len(values))
+    variance = sum((value - mean_value) ** 2 for value in values) / Decimal(len(values))
+    std_dev = decimal_sqrt(variance)
+
+    if std_dev is None or std_dev == 0:
+        return None
+
+    return (current_volume - mean_value) / std_dev
+
+
+def classify_volume_signal(volume_ratio: Decimal | None) -> str:
+    if volume_ratio is None:
+        return "unknown"
+
+    if volume_ratio >= Decimal("1.5"):
+        return "high"
+
+    if volume_ratio >= Decimal("1.0"):
+        return "normal"
+
+    return "low"
+
+
+def classify_volume_context(volume_ratio: Decimal | None) -> str:
+    if volume_ratio is None:
+        return "unknown"
+
+    if volume_ratio >= Decimal("1.5"):
+        return "strong"
+
+    if volume_ratio >= Decimal("1.0"):
+        return "normal"
+
+    return "weak"
+
+
+def calculate_bollinger_z_score(
+    close: Decimal,
+    middle_band: Decimal | None,
+    upper_band: Decimal | None,
+    stddev_multiplier: Decimal,
+) -> Decimal | None:
+    if middle_band is None or upper_band is None or stddev_multiplier == 0:
+        return None
+
+    band_std = (upper_band - middle_band) / stddev_multiplier
+    if band_std == 0:
+        return None
+
+    return (close - middle_band) / band_std
+
+
+def calculate_distance_outside_band(
+    close: Decimal,
+    lower_band: Decimal | None,
+    upper_band: Decimal | None,
+    middle_band: Decimal | None,
+    stddev_multiplier: Decimal,
+) -> Decimal | None:
+    if (
+        lower_band is None
+        or upper_band is None
+        or middle_band is None
+        or stddev_multiplier == 0
+    ):
+        return None
+
+    band_std = (upper_band - middle_band) / stddev_multiplier
+    if band_std == 0:
+        return None
+
+    if close > upper_band:
+        return (close - upper_band) / band_std
+
+    if close < lower_band:
+        return (lower_band - close) / band_std
+
+    return Decimal("0")
+
+
+def calculate_distance_from_nearest_band(
+    close: Decimal,
+    lower_band: Decimal | None,
+    upper_band: Decimal | None,
+    middle_band: Decimal | None,
+    stddev_multiplier: Decimal,
+) -> Decimal | None:
+    if (
+        lower_band is None
+        or upper_band is None
+        or middle_band is None
+        or stddev_multiplier == 0
+    ):
+        return None
+
+    band_std = (upper_band - middle_band) / stddev_multiplier
+    if band_std == 0:
+        return None
+
+    nearest_distance = min(abs(close - lower_band), abs(upper_band - close))
+    return nearest_distance / band_std
+
+
+def average_directional_index_series(
+    candles: list[Candle],
+    period: int = 14,
+) -> list[Decimal | None]:
+    if len(candles) < period + 1:
+        return []
+
+    trs: list[Decimal] = []
+    plus_dm_values: list[Decimal] = []
+    minus_dm_values: list[Decimal] = []
+
+    for i in range(1, len(candles)):
+        current = candles[i]
+        previous = candles[i - 1]
+
+        up_move = current.high - previous.high
+        down_move = previous.low - current.low
+
+        plus_dm = (
+            up_move
+            if up_move > 0 and up_move > down_move
+            else Decimal("0")
+        )
+        minus_dm = (
+            down_move
+            if down_move > 0 and down_move > up_move
+            else Decimal("0")
+        )
+
+        tr = max(
+            current.high - current.low,
+            abs(current.high - previous.close),
+            abs(current.low - previous.close),
+        )
+
+        trs.append(tr)
+        plus_dm_values.append(plus_dm)
+        minus_dm_values.append(minus_dm)
+
+    if len(trs) < period:
+        return []
+
+    smoothed_tr = sum(trs[:period])
+    smoothed_plus_dm = sum(plus_dm_values[:period])
+    smoothed_minus_dm = sum(minus_dm_values[:period])
+
+    dx_values: list[Decimal] = []
+
+    plus_di = (smoothed_plus_dm / smoothed_tr) * Decimal("100") if smoothed_tr != 0 else Decimal("0")
+    minus_di = (smoothed_minus_dm / smoothed_tr) * Decimal("100") if smoothed_tr != 0 else Decimal("0")
+    di_sum = plus_di + minus_di
+    dx = (abs(plus_di - minus_di) / di_sum) * Decimal("100") if di_sum != 0 else Decimal("0")
+    dx_values.append(dx)
+
+    for i in range(period, len(trs)):
+        smoothed_tr = smoothed_tr - (smoothed_tr / Decimal(period)) + trs[i]
+        smoothed_plus_dm = smoothed_plus_dm - (smoothed_plus_dm / Decimal(period)) + plus_dm_values[i]
+        smoothed_minus_dm = smoothed_minus_dm - (smoothed_minus_dm / Decimal(period)) + minus_dm_values[i]
+
+        plus_di = (smoothed_plus_dm / smoothed_tr) * Decimal("100") if smoothed_tr != 0 else Decimal("0")
+        minus_di = (smoothed_minus_dm / smoothed_tr) * Decimal("100") if smoothed_tr != 0 else Decimal("0")
+        di_sum = plus_di + minus_di
+        dx = (abs(plus_di - minus_di) / di_sum) * Decimal("100") if di_sum != 0 else Decimal("0")
+        dx_values.append(dx)
+
+    if len(dx_values) < period:
+        return [None] * len(candles)
+
+    adx_values: list[Decimal | None] = [None] * len(candles)
+
+    first_adx = sum(dx_values[:period]) / Decimal(period)
+    adx_index = period * 2
+    if adx_index < len(adx_values):
+        adx_values[adx_index] = first_adx
+
+    previous_adx = first_adx
+    for i in range(period, len(dx_values)):
+        current_adx = ((previous_adx * Decimal(period - 1)) + dx_values[i]) / Decimal(period)
+        target_index = i + period + 1
+        if target_index < len(adx_values):
+            adx_values[target_index] = current_adx
+        previous_adx = current_adx
+
+    return adx_values
+
+
+def decimal_sqrt(value: Decimal) -> Decimal | None:
+    if value < 0:
+        return None
+    if value == 0:
+        return Decimal("0")
+
+    with localcontext() as ctx:
+        ctx.prec = 28
+        return value.sqrt()
+
+
+def quantize_decimal(value: Decimal | None, places: str = "0.00000001") -> Decimal | None:
+    if value is None:
+        return None
+    return value.quantize(Decimal(places), rounding=ROUND_HALF_UP)
