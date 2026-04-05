@@ -9,6 +9,7 @@ from app.models.domain.strategy_case import StrategyCase
 from app.models.domain.strategy_config import StrategyConfig
 from app.models.domain.strategy_definition import StrategyDefinition
 from app.models.domain.strategy_run import StrategyRun
+from app.strategies.analysis_snapshot_builder import build_analysis_snapshot
 from app.strategies.base import BaseStrategy
 from app.strategies.decisions import CaseCloseDecision, TriggerDecision
 
@@ -17,7 +18,7 @@ class BollingerReversalStrategy(BaseStrategy):
     definition = StrategyDefinition(
         key="bollinger_reversal",
         name="Bollinger Reversal",
-        version="2.0.0",
+        version="2.1.0",
         description=(
             "Detecta reversão por Bollinger em ambos os lados: "
             "fechou fora da banda e o candle seguinte fechou novamente dentro. "
@@ -29,7 +30,7 @@ class BollingerReversalStrategy(BaseStrategy):
 
     def warmup_period(self, config: StrategyConfig) -> int:
         period = int(config.parameters.get("bollinger_period", 20))
-        return period
+        return max(period, 40)
 
     def calculate_indicators(
         self,
@@ -109,6 +110,7 @@ class BollingerReversalStrategy(BaseStrategy):
                 reason="bollinger_reversal_short_confirmed",
                 metadata={
                     "direction": "short",
+                    "setup_type": "bb_reentry",
                     "previous_upper_band": str(previous_upper),
                     "current_upper_band": str(current_upper),
                     "middle_band": str(current_middle),
@@ -128,6 +130,7 @@ class BollingerReversalStrategy(BaseStrategy):
                 reason="bollinger_reversal_long_confirmed",
                 metadata={
                     "direction": "long",
+                    "setup_type": "bb_reentry",
                     "previous_lower_band": str(previous_lower),
                     "current_lower_band": str(current_lower),
                     "middle_band": str(current_middle),
@@ -157,6 +160,7 @@ class BollingerReversalStrategy(BaseStrategy):
             raise ValueError("trigger must be confirmed before creating a case")
 
         direction = str(trigger.metadata.get("direction", "")).lower()
+        setup_type = str(trigger.metadata.get("setup_type", "bb_reentry"))
         indicators = self.calculate_indicators(candles[: index + 1], config)
 
         middle_band = indicators["middle_band"]
@@ -174,12 +178,21 @@ class BollingerReversalStrategy(BaseStrategy):
             entry_price = current_candle.low
             target_price = middle_band
             invalidation_price = current_candle.high
+            trade_bias = "Venda"
         elif direction == "long":
             entry_price = current_candle.high
             target_price = middle_band
             invalidation_price = current_candle.low
+            trade_bias = "Compra"
         else:
             raise ValueError("invalid bollinger reversal direction")
+
+        analysis_snapshot = build_analysis_snapshot(
+            candles=candles,
+            index=index,
+            direction=direction,
+            setup_type=setup_type,
+        )
 
         return StrategyCase(
             run_id=run.id or "run-placeholder",
@@ -196,10 +209,13 @@ class BollingerReversalStrategy(BaseStrategy):
             timeout_at=timeout_at,
             metadata={
                 "strategy_key": self.definition.key,
+                "setup_type": setup_type,
+                "trade_bias": trade_bias,
                 "direction": direction,
                 "middle_band": str(middle_band),
                 "confirmation_candle_high": str(current_candle.high),
                 "confirmation_candle_low": str(current_candle.low),
+                "analysis_snapshot": analysis_snapshot,
             },
         )
 

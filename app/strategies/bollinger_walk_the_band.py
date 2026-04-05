@@ -9,6 +9,7 @@ from app.models.domain.strategy_case import StrategyCase
 from app.models.domain.strategy_config import StrategyConfig
 from app.models.domain.strategy_definition import StrategyDefinition
 from app.models.domain.strategy_run import StrategyRun
+from app.strategies.analysis_snapshot_builder import build_analysis_snapshot
 from app.strategies.base import BaseStrategy
 from app.strategies.decisions import CaseCloseDecision, TriggerDecision
 
@@ -17,7 +18,7 @@ class BollingerWalkTheBandStrategy(BaseStrategy):
     definition = StrategyDefinition(
         key="bollinger_walk_the_band",
         name="Bollinger Walk The Band",
-        version="1.0.0",
+        version="1.1.0",
         description=(
             "Detecta continuação quando o candle fecha na banda externa. "
             "A estratégia opera continuação na direção da banda, usa a middle "
@@ -28,7 +29,7 @@ class BollingerWalkTheBandStrategy(BaseStrategy):
 
     def warmup_period(self, config: StrategyConfig) -> int:
         period = int(config.parameters.get("bollinger_period", 20))
-        return period
+        return max(period, 40)
 
     def calculate_indicators(
         self,
@@ -87,6 +88,7 @@ class BollingerWalkTheBandStrategy(BaseStrategy):
                 reason="bollinger_walk_upper_band_long_confirmed",
                 metadata={
                     "direction": "long",
+                    "setup_type": "bb_walk_the_band",
                     "upper_band": str(upper_band),
                     "middle_band": str(middle_band),
                     "close": str(current_candle.close),
@@ -99,6 +101,7 @@ class BollingerWalkTheBandStrategy(BaseStrategy):
                 reason="bollinger_walk_lower_band_short_confirmed",
                 metadata={
                     "direction": "short",
+                    "setup_type": "bb_walk_the_band",
                     "lower_band": str(lower_band),
                     "middle_band": str(middle_band),
                     "close": str(current_candle.close),
@@ -124,6 +127,7 @@ class BollingerWalkTheBandStrategy(BaseStrategy):
             raise ValueError("trigger must be confirmed before creating a case")
 
         direction = str(trigger.metadata.get("direction", "")).lower()
+        setup_type = str(trigger.metadata.get("setup_type", "bb_walk_the_band"))
         indicators = self.calculate_indicators(candles[: index + 1], config)
 
         middle_band = indicators["middle_band"]
@@ -149,14 +153,23 @@ class BollingerWalkTheBandStrategy(BaseStrategy):
             if risk <= 0:
                 raise ValueError("invalid long risk for bollinger walk the band")
             target_price = entry_price + (risk * risk_reward)
+            trade_bias = "Compra"
         elif direction == "short":
             invalidation_price = middle_band
             risk = invalidation_price - entry_price
             if risk <= 0:
                 raise ValueError("invalid short risk for bollinger walk the band")
             target_price = entry_price - (risk * risk_reward)
+            trade_bias = "Venda"
         else:
             raise ValueError("invalid bollinger walk the band direction")
+
+        analysis_snapshot = build_analysis_snapshot(
+            candles=candles,
+            index=index,
+            direction=direction,
+            setup_type=setup_type,
+        )
 
         return StrategyCase(
             run_id=run.id or "run-placeholder",
@@ -173,9 +186,12 @@ class BollingerWalkTheBandStrategy(BaseStrategy):
             timeout_at=timeout_at,
             metadata={
                 "strategy_key": self.definition.key,
+                "setup_type": setup_type,
+                "trade_bias": trade_bias,
                 "direction": direction,
                 "middle_band": str(middle_band),
                 "risk_reward": str(risk_reward),
+                "analysis_snapshot": analysis_snapshot,
             },
         )
 
