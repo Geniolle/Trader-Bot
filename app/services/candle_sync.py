@@ -1,11 +1,14 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from app.core.logging import get_logger
 from app.core.settings import get_settings
 from app.providers.factory import MarketDataProviderFactory
 from app.storage.repositories.candle_queries import CandleQueryRepository
 from app.storage.repositories.candle_repository import CandleRepository
 from app.utils.datetime_utils import ensure_naive_utc, timeframe_to_timedelta
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -37,6 +40,15 @@ class CandleSyncService:
         normalized_start_at = ensure_naive_utc(start_at)
         normalized_end_at = ensure_naive_utc(end_at)
 
+        logger.info("###################################################################################")
+        logger.info(
+            "[CANDLE_SYNC] INÍCIO | SYMBOL=%s | TIMEFRAME=%s | START=%s | END=%s",
+            normalized_symbol,
+            normalized_timeframe,
+            normalized_start_at.isoformat(),
+            normalized_end_at.isoformat(),
+        )
+
         rows = self.query_repository.list_by_symbol_timeframe_range(
             session=session,
             symbol=normalized_symbol,
@@ -51,9 +63,24 @@ class CandleSyncService:
             timeframe=normalized_timeframe,
         )
 
+        logger.info(
+            "[CANDLE_SYNC] BASE_LOCAL | COUNT_RANGE=%s | HAS_LATEST=%s",
+            len(rows),
+            latest_local is not None,
+        )
+
         if rows and latest_local is not None:
             latest_local_close_time = ensure_naive_utc(latest_local.close_time)
+
+            logger.info(
+                "[CANDLE_SYNC] ÚLTIMO_LOCAL | OPEN=%s | CLOSE=%s",
+                ensure_naive_utc(latest_local.open_time).isoformat(),
+                latest_local_close_time.isoformat(),
+            )
+
             if latest_local_close_time >= normalized_end_at:
+                logger.info("[CANDLE_SYNC] COBERTURA_LOCAL_OK | PROVIDER=NO")
+                logger.info("###################################################################################")
                 return CandleSyncResult(
                     symbol=normalized_symbol,
                     timeframe=normalized_timeframe,
@@ -62,8 +89,12 @@ class CandleSyncService:
                     reason="local_coverage_ok",
                 )
 
-        provider = MarketDataProviderFactory().get_provider(
-            provider_name or self.settings.market_data_provider
+        provider_name_effective = provider_name or self.settings.market_data_provider
+        provider = MarketDataProviderFactory().get_provider(provider_name_effective)
+
+        logger.info(
+            "[CANDLE_SYNC] PROVIDER_ESCOLHIDO | PROVIDER=%s",
+            provider_name_effective,
         )
 
         if latest_local is None:
@@ -74,6 +105,13 @@ class CandleSyncService:
                 - (timeframe_to_timedelta(normalized_timeframe) * bootstrap_limit),
             )
 
+            logger.info(
+                "[CANDLE_SYNC] BOOTSTRAP | LIMIT=%s | FETCH_START=%s | FETCH_END=%s",
+                bootstrap_limit,
+                bootstrap_start.isoformat(),
+                normalized_end_at.isoformat(),
+            )
+
             candles = provider.get_historical_candles(
                 symbol=normalized_symbol,
                 timeframe=normalized_timeframe,
@@ -81,9 +119,16 @@ class CandleSyncService:
                 end_at=normalized_end_at,
             )
 
+            logger.info(
+                "[CANDLE_SYNC] BOOTSTRAP_RESULT | FETCHED=%s",
+                len(candles),
+            )
+
             if candles:
                 self.write_repository.save_many(session, candles)
+                logger.info("[CANDLE_SYNC] BOOTSTRAP_SAVE | SAVED=%s", len(candles))
 
+            logger.info("###################################################################################")
             return CandleSyncResult(
                 symbol=normalized_symbol,
                 timeframe=normalized_timeframe,
@@ -96,6 +141,8 @@ class CandleSyncService:
         latest_open = ensure_naive_utc(latest_local.open_time)
 
         if latest_close >= normalized_end_at:
+            logger.info("[CANDLE_SYNC] LOCAL_JÁ_ATUAL | PROVIDER=NO")
+            logger.info("###################################################################################")
             return CandleSyncResult(
                 symbol=normalized_symbol,
                 timeframe=normalized_timeframe,
@@ -113,7 +160,16 @@ class CandleSyncService:
             end_at=gap_end,
         )
 
+        logger.info(
+            "[CANDLE_SYNC] GAP_ANALYSIS | GAP_START=%s | GAP_END=%s | MISSING_BARS=%s",
+            gap_start.isoformat(),
+            gap_end.isoformat(),
+            missing_bars,
+        )
+
         if missing_bars <= 0:
+            logger.info("[CANDLE_SYNC] NOTHING_TO_SYNC")
+            logger.info("###################################################################################")
             return CandleSyncResult(
                 symbol=normalized_symbol,
                 timeframe=normalized_timeframe,
@@ -129,6 +185,11 @@ class CandleSyncService:
                 normalized_end_at
                 - (timeframe_to_timedelta(normalized_timeframe) * max_gap_bars),
             )
+            logger.info(
+                "[CANDLE_SYNC] GAP_LIMIT_APLICADO | MAX_GAP_BARS=%s | NEW_GAP_START=%s",
+                max_gap_bars,
+                gap_start.isoformat(),
+            )
 
         candles = provider.get_historical_candles(
             symbol=normalized_symbol,
@@ -137,9 +198,16 @@ class CandleSyncService:
             end_at=gap_end,
         )
 
+        logger.info(
+            "[CANDLE_SYNC] GAP_FETCH_RESULT | FETCHED=%s",
+            len(candles),
+        )
+
         if candles:
             self.write_repository.save_many(session, candles)
+            logger.info("[CANDLE_SYNC] GAP_SAVE | SAVED=%s", len(candles))
 
+        logger.info("###################################################################################")
         return CandleSyncResult(
             symbol=normalized_symbol,
             timeframe=normalized_timeframe,

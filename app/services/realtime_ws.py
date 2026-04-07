@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from fastapi import WebSocket
@@ -11,11 +11,7 @@ from app.core.logging import get_logger
 from app.storage.database import SessionLocal
 from app.storage.repositories.candle_queries import CandleQueryRepository
 from app.services.candle_sync import CandleSyncService
-from app.utils.datetime_utils import (
-    ensure_naive_utc,
-    floor_open_time,
-    timeframe_to_timedelta,
-)
+from app.utils.datetime_utils import ensure_naive_utc, timeframe_to_timedelta
 
 logger = get_logger(__name__)
 
@@ -79,8 +75,9 @@ class RealtimeSubscriptionWorker:
             await asyncio.gather(self.task, return_exceptions=True)
 
     async def run(self) -> None:
+        logger.info("###################################################################################")
         logger.info(
-            "[WS] worker started | symbol=%s | timeframe=%s",
+            "[WS_WORKER] START | SYMBOL=%s | TIMEFRAME=%s",
             self.key.symbol,
             self.key.timeframe,
         )
@@ -89,36 +86,39 @@ class RealtimeSubscriptionWorker:
             await self._bootstrap_and_publish_initial()
 
             while not self.stop_event.is_set():
-                await self._poll_and_publish()
-                await asyncio.wait_for(
-                    self.stop_event.wait(),
-                    timeout=self._poll_interval_seconds(),
-                )
-        except asyncio.TimeoutError:
-            # fluxo normal do loop
-            await self.run()
-        except Exception as exc:
-            logger.exception(
-                "[WS] worker failed | symbol=%s | timeframe=%s | error=%s",
-                self.key.symbol,
-                self.key.timeframe,
-                exc,
-            )
-            await self.manager.broadcast_event(
-                self.key,
-                "provider_error",
-                {
-                    "symbol": self.key.symbol,
-                    "timeframe": self.key.timeframe,
-                    "message": str(exc),
-                },
-            )
+                try:
+                    await self._poll_and_publish()
+                except Exception as exc:
+                    logger.exception(
+                        "[WS_WORKER] POLL_ERROR | SYMBOL=%s | TIMEFRAME=%s | ERROR=%s",
+                        self.key.symbol,
+                        self.key.timeframe,
+                        exc,
+                    )
+                    await self.manager.broadcast_event(
+                        self.key,
+                        "provider_error",
+                        {
+                            "symbol": self.key.symbol,
+                            "timeframe": self.key.timeframe,
+                            "message": str(exc),
+                        },
+                    )
+
+                try:
+                    await asyncio.wait_for(
+                        self.stop_event.wait(),
+                        timeout=self._poll_interval_seconds(),
+                    )
+                except asyncio.TimeoutError:
+                    pass
         finally:
             logger.info(
-                "[WS] worker stopped | symbol=%s | timeframe=%s",
+                "[WS_WORKER] STOP | SYMBOL=%s | TIMEFRAME=%s",
                 self.key.symbol,
                 self.key.timeframe,
             )
+            logger.info("###################################################################################")
 
     async def _bootstrap_and_publish_initial(self) -> None:
         session = SessionLocal()
@@ -129,12 +129,28 @@ class RealtimeSubscriptionWorker:
                 timeframe_to_timedelta(self.key.timeframe) * bootstrap_bars
             )
 
-            CandleSyncService().ensure_local_coverage(
+            logger.info(
+                "[WS_WORKER] INITIAL_BOOTSTRAP | SYMBOL=%s | TIMEFRAME=%s | START=%s | END=%s | BARS=%s",
+                self.key.symbol,
+                self.key.timeframe,
+                start_at.isoformat(),
+                now.isoformat(),
+                bootstrap_bars,
+            )
+
+            sync_result = CandleSyncService().ensure_local_coverage(
                 session=session,
                 symbol=self.key.symbol,
                 timeframe=self.key.timeframe,
                 start_at=start_at,
                 end_at=now,
+            )
+
+            logger.info(
+                "[WS_WORKER] INITIAL_BOOTSTRAP_RESULT | USED_PROVIDER=%s | FETCHED=%s | REASON=%s",
+                sync_result.used_provider,
+                sync_result.fetched_count,
+                sync_result.reason,
             )
 
             rows = CandleQueryRepository().list_by_filters(
@@ -144,6 +160,11 @@ class RealtimeSubscriptionWorker:
                 start_at=start_at,
                 end_at=now,
                 limit=min(max(bootstrap_bars, 50), 1000),
+            )
+
+            logger.info(
+                "[WS_WORKER] INITIAL_ROWS | COUNT=%s",
+                len(rows),
             )
 
             payload = {
@@ -158,6 +179,11 @@ class RealtimeSubscriptionWorker:
                 ).isoformat()
 
             await self.manager.broadcast_event(self.key, "initial_candles", payload)
+
+            logger.info(
+                "[WS_WORKER] INITIAL_PUBLISH | LAST_OPEN_TIME=%s",
+                self.last_sent_open_time or "-",
+            )
         finally:
             session.close()
 
@@ -176,9 +202,18 @@ class RealtimeSubscriptionWorker:
                 else ""
             )
 
+            recent_bars = self.manager.recent_sync_bars_for_timeframe(self.key.timeframe)
             recent_window_start = now - (
-                timeframe_to_timedelta(self.key.timeframe)
-                * self.manager.recent_sync_bars_for_timeframe(self.key.timeframe)
+                timeframe_to_timedelta(self.key.timeframe) * recent_bars
+            )
+
+            logger.info(
+                "[WS_WORKER] POLL | SYMBOL=%s | TIMEFRAME=%s | WINDOW_START=%s | WINDOW_END=%s | RECENT_BARS=%s",
+                self.key.symbol,
+                self.key.timeframe,
+                recent_window_start.isoformat(),
+                now.isoformat(),
+                recent_bars,
             )
 
             sync_result = CandleSyncService().ensure_local_coverage(
@@ -189,6 +224,13 @@ class RealtimeSubscriptionWorker:
                 end_at=now,
             )
 
+            logger.info(
+                "[WS_WORKER] POLL_SYNC_RESULT | USED_PROVIDER=%s | FETCHED=%s | REASON=%s",
+                sync_result.used_provider,
+                sync_result.fetched_count,
+                sync_result.reason,
+            )
+
             latest_row_after = CandleQueryRepository().get_latest_by_symbol_timeframe(
                 session=session,
                 symbol=self.key.symbol,
@@ -196,16 +238,25 @@ class RealtimeSubscriptionWorker:
             )
 
             if latest_row_after is None:
+                logger.info("[WS_WORKER] POLL_NO_ROWS")
                 return
 
             latest_open_after = ensure_naive_utc(latest_row_after.open_time).isoformat()
-
             refresh_reason = sync_result.reason
+
             if (
                 sync_result.used_provider
                 and sync_result.fetched_count > 0
                 and latest_open_after != latest_open_before
             ):
+                logger.info(
+                    "[WS_WORKER] REFRESH_EVENT | PREV_OPEN=%s | NEW_OPEN=%s | FETCHED=%s | REASON=%s",
+                    latest_open_before or "-",
+                    latest_open_after,
+                    sync_result.fetched_count,
+                    refresh_reason,
+                )
+
                 await self.manager.broadcast_event(
                     self.key,
                     "candles_refresh",
@@ -218,12 +269,23 @@ class RealtimeSubscriptionWorker:
                     },
                 )
 
-            if latest_open_after != self.last_sent_open_time or refresh_reason != self.last_refresh_reason:
+            if (
+                latest_open_after != self.last_sent_open_time
+                or refresh_reason != self.last_refresh_reason
+            ):
+                logger.info(
+                    "[WS_WORKER] TICK_EVENT | LAST_SENT=%s | CURRENT=%s | REASON=%s",
+                    self.last_sent_open_time or "-",
+                    latest_open_after,
+                    refresh_reason,
+                )
+
                 await self.manager.broadcast_event(
                     self.key,
                     "candle_tick",
                     row_to_ws_candle(latest_row_after),
                 )
+
                 self.last_sent_open_time = latest_open_after
                 self.last_refresh_reason = refresh_reason
         finally:
@@ -265,6 +327,11 @@ class RealtimeWSManager:
             if self._heartbeat_task is None or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
+        logger.info(
+            "[WS_MANAGER] CONNECT | ACTIVE_CONNECTIONS=%s",
+            len(self._connections),
+        )
+
         await self._send_event(
             websocket,
             "connected",
@@ -280,18 +347,38 @@ class RealtimeWSManager:
                 self._subscriptions_by_socket[websocket].discard(key)
                 self._sockets_by_subscription[key].discard(websocket)
 
+                logger.info(
+                    "[WS_MANAGER] UNSUBSCRIBE_SOCKET | SYMBOL=%s | TIMEFRAME=%s | REMAINING=%s",
+                    key.symbol,
+                    key.timeframe,
+                    len(self._sockets_by_subscription[key]),
+                )
+
                 if not self._sockets_by_subscription[key]:
                     worker = self._workers.pop(key, None)
                     if worker is not None:
                         await worker.stop()
                     self._sockets_by_subscription.pop(key, None)
 
+                    logger.info(
+                        "[WS_MANAGER] WORKER_REMOVED | SYMBOL=%s | TIMEFRAME=%s",
+                        key.symbol,
+                        key.timeframe,
+                    )
+
             self._subscriptions_by_socket.pop(websocket, None)
+
+        logger.info(
+            "[WS_MANAGER] DISCONNECT | ACTIVE_CONNECTIONS=%s",
+            len(self._connections),
+        )
 
     async def handle_message(self, websocket: WebSocket, raw_message: str) -> None:
         raw_message = (raw_message or "").strip()
         if not raw_message:
             return
+
+        logger.info("[WS_MANAGER] MESSAGE | RAW=%s", raw_message)
 
         if raw_message == "frontend_connected":
             await self._send_event(
@@ -342,6 +429,19 @@ class RealtimeWSManager:
                 self._workers[key] = worker
                 worker.start()
 
+                logger.info(
+                    "[WS_MANAGER] WORKER_CREATED | SYMBOL=%s | TIMEFRAME=%s",
+                    key.symbol,
+                    key.timeframe,
+                )
+
+        logger.info(
+            "[WS_MANAGER] SUBSCRIBED | SYMBOL=%s | TIMEFRAME=%s | LISTENERS=%s",
+            key.symbol,
+            key.timeframe,
+            len(self._sockets_by_subscription[key]),
+        )
+
         await self._send_event(
             websocket,
             "subscribed",
@@ -359,6 +459,15 @@ class RealtimeWSManager:
         data: dict[str, Any],
     ) -> None:
         sockets = list(self._sockets_by_subscription.get(key, set()))
+
+        logger.info(
+            "[WS_MANAGER] BROADCAST | EVENT=%s | SYMBOL=%s | TIMEFRAME=%s | TARGETS=%s",
+            event_name,
+            key.symbol,
+            key.timeframe,
+            len(sockets),
+        )
+
         for socket in sockets:
             await self._send_event(socket, event_name, data)
 
@@ -387,6 +496,12 @@ class RealtimeWSManager:
 
                 self._heartbeat_count += 1
                 sockets = list(self._connections)
+
+            logger.info(
+                "[WS_MANAGER] HEARTBEAT | COUNT=%s | CONNECTIONS=%s",
+                self._heartbeat_count,
+                len(sockets),
+            )
 
             for socket in sockets:
                 await self._send_event(

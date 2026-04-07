@@ -10,6 +10,7 @@ from app.api.v1.endpoints.run_history import router as run_history_router
 from app.api.v1.endpoints.run_metrics import router as run_metrics_router
 from app.api.v1.endpoints.runs import router as runs_router
 from app.api.v1.endpoints.strategies import router as strategies_router
+from app.api.v1.endpoints.ws import router as ws_router
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -23,3 +24,4 @@ api_router.include_router(run_metrics_router)
 api_router.include_router(run_cases_router)
 api_router.include_router(run_details_router)
 api_router.include_router(candles_router)
+api_router.include_router(ws_router)
