@@ -1,9 +1,10 @@
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
+from app.core.settings import get_settings
 from app.schemas.run import CandleResponse
-from app.services.candle_sync import CandleSyncService
+from app.services.candle_cache_sync import CandleCacheSyncService
 from app.storage.database import SessionLocal
 from app.storage.repositories.candle_queries import CandleQueryRepository
 
@@ -18,38 +19,25 @@ def list_candles(
     end_at: datetime = Query(...),
     limit: int = Query(default=500, ge=1, le=5000),
     mode: str = Query(default="full"),
+    sync: bool = Query(default=True),
 ) -> list[CandleResponse]:
-    normalized_symbol = symbol.strip().upper()
-    normalized_timeframe = timeframe.strip().lower()
-
+    settings = get_settings()
     session = SessionLocal()
-    try:
-        sync_service = CandleSyncService()
 
-        try:
-            sync_service.ensure_local_coverage(
+    try:
+        if settings.candle_cache_enabled and settings.candle_cache_sync_on_read and sync:
+            CandleCacheSyncService().ensure_range(
                 session=session,
-                symbol=normalized_symbol,
-                timeframe=normalized_timeframe,
+                symbol=symbol,
+                timeframe=timeframe,
                 start_at=start_at,
                 end_at=end_at,
             )
-        except ValueError as exc:
-            rows = CandleQueryRepository().list_by_filters(
-                session=session,
-                symbol=normalized_symbol,
-                timeframe=normalized_timeframe,
-                start_at=start_at,
-                end_at=end_at,
-                limit=limit,
-            )
-            if not rows:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         rows = CandleQueryRepository().list_by_filters(
             session=session,
-            symbol=normalized_symbol,
-            timeframe=normalized_timeframe,
+            symbol=symbol.strip().upper(),
+            timeframe=timeframe.strip().lower(),
             start_at=start_at,
             end_at=end_at,
             limit=limit,

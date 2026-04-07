@@ -1,42 +1,40 @@
-# app/schemas/catalog.py
-
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
-class CatalogProductSummaryResponse(BaseModel):
+class CatalogProductSummary(BaseModel):
     code: str
     label: str
-    description: str
-    total_subproducts: int
-    total_items: int
+    description: str = ""
+    total_subproducts: int = 0
+    total_items: int = 0
 
 
-class CatalogProductsResponse(BaseModel):
-    products: list[CatalogProductSummaryResponse]
-
-
-class CatalogSubproductResponse(BaseModel):
+class CatalogSubproduct(BaseModel):
     code: str
     label: str
-    description: str
+    description: str = ""
 
 
-class CatalogProductResponse(BaseModel):
-    code: str
-    label: str
-    description: str
-    subproducts: list[CatalogSubproductResponse]
-
-
-class CatalogInstrumentResponse(BaseModel):
+class CatalogInstrument(BaseModel):
     symbol: str
     display_name: str
     base_asset: str
     quote_asset: str
 
 
+class CatalogProductsResponse(BaseModel):
+    products: list[CatalogProductSummary] = Field(default_factory=list)
+
+
+class CatalogProductResponse(BaseModel):
+    code: str
+    label: str
+    description: str = ""
+    subproducts: list[CatalogSubproduct] = Field(default_factory=list)
+
+
 class CatalogItemsResponse(BaseModel):
     product: str
     subproduct: str | None = None
-    total_items: int
-    items: list[CatalogInstrumentResponse]
+    total_items: int = 0
+    items: list[CatalogInstrument] = Field(default_factory=list)

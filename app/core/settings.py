@@ -21,10 +21,9 @@ class Settings(BaseSettings):
 
     database_url: str = Field(default="sqlite:///./market_research_lab.db")
 
-    candles_bootstrap_limit_intraday: int = Field(default=240)
-    candles_bootstrap_limit_daily: int = Field(default=120)
-    candles_gap_fill_max_bars: int = Field(default=500)
-    provider_quota_cooldown_minutes: int = Field(default=30)
+    candle_cache_enabled: bool = Field(default=True)
+    candle_cache_sync_on_read: bool = Field(default=True)
+    candle_cache_reconcile_bars: int = Field(default=2)
 
     model_config = SettingsConfigDict(
         env_file=".env",
