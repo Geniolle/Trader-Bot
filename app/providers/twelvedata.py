@@ -1,46 +1,21 @@
 # app/providers/twelvedata.py
 
 import json
-import re
+import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from app.core.logging import get_logger
 from app.core.settings import get_settings
 from app.models.domain.candle import Candle
 from app.providers.base import BaseMarketDataProvider
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class TwelveDataProvider(BaseMarketDataProvider):
-    _FIAT_CODES = {
-        "USD",
-        "EUR",
-        "GBP",
-        "JPY",
-        "CHF",
-        "CAD",
-        "AUD",
-        "NZD",
-        "BRL",
-        "MXN",
-        "SEK",
-        "NOK",
-        "DKK",
-        "ZAR",
-        "HKD",
-        "SGD",
-        "TRY",
-        "PLN",
-        "CZK",
-        "HUF",
-        "RON",
-    }
-
     def __init__(self) -> None:
         self.settings = get_settings()
 
@@ -57,20 +32,8 @@ class TwelveDataProvider(BaseMarketDataProvider):
         if not self.settings.twelvedata_api_key:
             raise ValueError("Twelve Data API key is not configured")
 
+        provider_symbol = self._normalize_symbol_for_provider(symbol)
         interval = self._map_timeframe_to_interval(timeframe)
-        provider_symbol = self._normalize_symbol_for_twelvedata(symbol)
-
-        params = {
-            "symbol": provider_symbol,
-            "interval": interval,
-            "start_date": start_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_date": end_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "outputsize": 5000,
-            "order": "asc",
-            "format": "JSON",
-        }
-
-        url = f"{self.settings.twelvedata_base_url}/time_series?{urlencode(params)}"
 
         logger.info(
             {
@@ -83,6 +46,18 @@ class TwelveDataProvider(BaseMarketDataProvider):
                 "end_at": end_at.isoformat(),
             }
         )
+
+        params = {
+            "symbol": provider_symbol,
+            "interval": interval,
+            "start_date": start_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_date": end_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "outputsize": 5000,
+            "order": "asc",
+            "format": "JSON",
+        }
+
+        url = f"{self.settings.twelvedata_base_url}/time_series?{urlencode(params)}"
 
         request = Request(
             url,
@@ -104,6 +79,16 @@ class TwelveDataProvider(BaseMarketDataProvider):
                 payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             raw_body = exc.read().decode("utf-8", errors="replace")
+            logger.error(
+                {
+                    "event": "twelvedata_http_error",
+                    "status_code": exc.code,
+                    "symbol": symbol,
+                    "provider_symbol": provider_symbol,
+                    "timeframe": timeframe,
+                    "raw_body": raw_body,
+                }
+            )
             try:
                 error_payload = json.loads(raw_body)
                 message = error_payload.get("message", raw_body)
@@ -117,11 +102,30 @@ class TwelveDataProvider(BaseMarketDataProvider):
                     f"Twelve Data HTTP error {exc.code}: {raw_body}"
                 ) from exc
         except URLError as exc:
+            logger.error(
+                {
+                    "event": "twelvedata_network_error",
+                    "symbol": symbol,
+                    "provider_symbol": provider_symbol,
+                    "timeframe": timeframe,
+                    "reason": str(exc.reason),
+                }
+            )
             raise ValueError(f"Twelve Data network error: {exc.reason}") from exc
 
         if payload.get("status") == "error":
             message = payload.get("message", "Unknown Twelve Data API error")
             code = payload.get("code", "unknown")
+            logger.error(
+                {
+                    "event": "twelvedata_api_error",
+                    "symbol": symbol,
+                    "provider_symbol": provider_symbol,
+                    "timeframe": timeframe,
+                    "code": code,
+                    "message": message,
+                }
+            )
             raise ValueError(f"Twelve Data API error ({code}): {message}")
 
         values = payload.get("values", [])
@@ -148,36 +152,28 @@ class TwelveDataProvider(BaseMarketDataProvider):
                 )
             )
 
+        logger.info(
+            {
+                "event": "twelvedata_response_ok",
+                "symbol": symbol,
+                "provider_symbol": provider_symbol,
+                "timeframe": timeframe,
+                "candles_count": len(candles),
+            }
+        )
+
         return candles
 
-    def _normalize_symbol_for_twelvedata(self, symbol: str) -> str:
-        normalized = (symbol or "").strip().upper()
+    def _normalize_symbol_for_provider(self, symbol: str) -> str:
+        normalized = symbol.strip().upper()
 
-        if not normalized:
-            raise ValueError("Symbol is empty for Twelve Data request")
-
-        if re.fullmatch(r"[A-Z0-9]+", normalized):
+        if "/" in normalized:
             return normalized
 
-        parts = [part for part in re.split(r"[^A-Z0-9]+", normalized) if part]
-
-        if len(parts) == 2:
-            base, quote = parts
-
-            if self._is_forex_pair(base, quote):
-                return f"{base}/{quote}"
-
-            return f"{base}{quote}"
+        if len(normalized) == 6 and normalized.isalpha():
+            return f"{normalized[:3]}/{normalized[3:]}"
 
         return normalized
-
-    def _is_forex_pair(self, base: str, quote: str) -> bool:
-        return (
-            len(base) == 3
-            and len(quote) == 3
-            and base in self._FIAT_CODES
-            and quote in self._FIAT_CODES
-        )
 
     def _map_timeframe_to_interval(self, timeframe: str) -> str:
         mapping = {
