@@ -1,330 +1,175 @@
-# app/services/candle_sync.py
-
-from __future__ import annotations
-
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
-from threading import Lock
-from typing import Any
-
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from datetime import UTC, datetime, timedelta
 
 from app.core.settings import get_settings
-from app.models.domain.candle import Candle
 from app.providers.factory import MarketDataProviderFactory
-from app.storage.models import CandleModel
 from app.storage.repositories.candle_queries import CandleQueryRepository
+from app.storage.repositories.candle_repository import CandleRepository
+
+
+def ensure_naive_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
 
 
 @dataclass
 class CandleSyncResult:
-    candles: list[Candle]
-    source: str
-    cache_hit: bool
-    db_hit: bool
-    provider_hit: bool
-    missing_filled: bool
-    requested_start_at: datetime
-    requested_end_at: datetime
-    newly_persisted_count: int
+    symbol: str
+    timeframe: str
+    used_provider: bool
+    fetched_count: int
+    reason: str
 
 
 class CandleSyncService:
-    _memory_cache: dict[str, tuple[datetime, list[Candle]]] = {}
-    _rate_limit_until: datetime | None = None
-    _lock = Lock()
-
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.query_repo = CandleQueryRepository()
-        self.provider_factory = MarketDataProviderFactory()
+        self.query_repository = CandleQueryRepository()
+        self.write_repository = CandleRepository()
 
-    def get_or_sync_candles(
+    def ensure_local_coverage(
         self,
-        *,
-        session: Session,
+        session,
         symbol: str,
         timeframe: str,
         start_at: datetime,
         end_at: datetime,
-        market_type: str | None = None,
-        catalog: str | None = None,
+        provider_name: str | None = None,
     ) -> CandleSyncResult:
         normalized_symbol = symbol.strip().upper()
         normalized_timeframe = timeframe.strip().lower()
-        requested_start_at = self._ensure_naive_utc(start_at)
-        requested_end_at = self._ensure_naive_utc(end_at)
+        normalized_start_at = ensure_naive_utc(start_at)
+        normalized_end_at = ensure_naive_utc(end_at)
 
-        cache_key = self._build_cache_key(
-            symbol=normalized_symbol,
-            timeframe=normalized_timeframe,
-            start_at=requested_start_at,
-            end_at=requested_end_at,
-        )
-
-        cached = self._get_memory_cache(cache_key)
-        if cached is not None:
-            return CandleSyncResult(
-                candles=cached,
-                source="memory_cache",
-                cache_hit=True,
-                db_hit=False,
-                provider_hit=False,
-                missing_filled=False,
-                requested_start_at=requested_start_at,
-                requested_end_at=requested_end_at,
-                newly_persisted_count=0,
-            )
-
-        local_candles = self._load_local_candles(
+        rows = self.query_repository.list_by_symbol_timeframe_range(
             session=session,
             symbol=normalized_symbol,
             timeframe=normalized_timeframe,
-            start_at=requested_start_at,
-            end_at=requested_end_at,
+            start_at=normalized_start_at,
+            end_at=normalized_end_at,
         )
 
-        if self._has_sufficient_local_coverage(
-            candles=local_candles,
-            timeframe=normalized_timeframe,
-            start_at=requested_start_at,
-            end_at=requested_end_at,
-        ):
-            self._set_memory_cache(cache_key, local_candles)
-            return CandleSyncResult(
-                candles=local_candles,
-                source="database",
-                cache_hit=False,
-                db_hit=True,
-                provider_hit=False,
-                missing_filled=False,
-                requested_start_at=requested_start_at,
-                requested_end_at=requested_end_at,
-                newly_persisted_count=0,
-            )
-
-        if self._is_rate_limited():
-            return CandleSyncResult(
-                candles=local_candles,
-                source="database_rate_limited",
-                cache_hit=False,
-                db_hit=bool(local_candles),
-                provider_hit=False,
-                missing_filled=False,
-                requested_start_at=requested_start_at,
-                requested_end_at=requested_end_at,
-                newly_persisted_count=0,
-            )
-
-        provider = self.provider_factory.get_provider(self.settings.market_data_provider)
-
-        provider_symbol = self._map_symbol_for_provider(
+        latest_local = self.write_repository.get_latest(
+            session=session,
             symbol=normalized_symbol,
-            market_type=market_type,
-            catalog=catalog,
-        )
-
-        fetch_start_at = requested_start_at
-        if local_candles:
-            last_close_time = max(self._ensure_naive_utc(item.close_time) for item in local_candles)
-            overlap = self._timeframe_delta(normalized_timeframe) * 2
-            fetch_start_at = max(requested_start_at, last_close_time - overlap)
-
-        fetched = provider.get_historical_candles(
-            symbol=provider_symbol,
             timeframe=normalized_timeframe,
-            start_at=fetch_start_at,
-            end_at=requested_end_at,
         )
 
-        normalized_fetched = [
-            self._normalize_provider_candle(
-                candle=item,
-                original_symbol=normalized_symbol,
+        if rows and latest_local is not None:
+            latest_local_close_time = ensure_naive_utc(latest_local.close_time)
+            if latest_local_close_time >= normalized_end_at:
+                return CandleSyncResult(
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    used_provider=False,
+                    fetched_count=0,
+                    reason="local_coverage_ok",
+                )
+
+        provider = MarketDataProviderFactory().get_provider(
+            provider_name or self.settings.market_data_provider
+        )
+
+        if latest_local is None:
+            bootstrap_limit = self._bootstrap_limit_for_timeframe(normalized_timeframe)
+            bootstrap_start = max(
+                normalized_start_at,
+                normalized_end_at
+                - (self._timeframe_to_timedelta(normalized_timeframe) * bootstrap_limit),
+            )
+
+            candles = provider.get_historical_candles(
+                symbol=normalized_symbol,
                 timeframe=normalized_timeframe,
+                start_at=bootstrap_start,
+                end_at=normalized_end_at,
             )
-            for item in fetched
-        ]
 
-        newly_persisted_count = self._persist_candles(
-            session=session,
-            candles=normalized_fetched,
+            if candles:
+                self.write_repository.save_many(session, candles)
+
+            return CandleSyncResult(
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                used_provider=True,
+                fetched_count=len(candles),
+                reason="bootstrap_recent_window",
+            )
+
+        latest_close = ensure_naive_utc(latest_local.close_time)
+        latest_open = ensure_naive_utc(latest_local.open_time)
+
+        if latest_close >= normalized_end_at:
+            return CandleSyncResult(
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                used_provider=False,
+                fetched_count=0,
+                reason="local_latest_already_current",
+            )
+
+        gap_start = latest_open
+        gap_end = normalized_end_at
+
+        missing_bars = self._count_bars_between(
+            timeframe=normalized_timeframe,
+            start_at=gap_start,
+            end_at=gap_end,
         )
 
-        final_candles = self._load_local_candles(
-            session=session,
+        if missing_bars <= 0:
+            return CandleSyncResult(
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                used_provider=False,
+                fetched_count=0,
+                reason="nothing_to_sync",
+            )
+
+        max_gap_bars = max(10, self.settings.candles_gap_fill_max_bars)
+        if missing_bars > max_gap_bars:
+            gap_start = max(
+                normalized_start_at,
+                normalized_end_at
+                - (self._timeframe_to_timedelta(normalized_timeframe) * max_gap_bars),
+            )
+
+        candles = provider.get_historical_candles(
             symbol=normalized_symbol,
             timeframe=normalized_timeframe,
-            start_at=requested_start_at,
-            end_at=requested_end_at,
+            start_at=gap_start,
+            end_at=gap_end,
         )
 
-        self._set_memory_cache(cache_key, final_candles)
+        if candles:
+            self.write_repository.save_many(session, candles)
 
         return CandleSyncResult(
-            candles=final_candles,
-            source=provider.provider_name(),
-            cache_hit=False,
-            db_hit=bool(local_candles),
-            provider_hit=True,
-            missing_filled=newly_persisted_count > 0,
-            requested_start_at=requested_start_at,
-            requested_end_at=requested_end_at,
-            newly_persisted_count=newly_persisted_count,
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            used_provider=True,
+            fetched_count=len(candles),
+            reason="gap_fill",
         )
 
-    def notify_rate_limit(self, cooldown_seconds: int = 300) -> None:
-        with self._lock:
-            self.__class__._rate_limit_until = datetime.now(timezone.utc) + timedelta(
-                seconds=cooldown_seconds
-            )
+    def _bootstrap_limit_for_timeframe(self, timeframe: str) -> int:
+        if timeframe in {"1d", "1w", "1mo"}:
+            return max(10, self.settings.candles_bootstrap_limit_daily)
+        return max(10, self.settings.candles_bootstrap_limit_intraday)
 
-    def _is_rate_limited(self) -> bool:
-        with self._lock:
-            until = self.__class__._rate_limit_until
-            if until is None:
-                return False
-            if datetime.now(timezone.utc) >= until:
-                self.__class__._rate_limit_until = None
-                return False
-            return True
-
-    def _build_cache_key(
+    def _count_bars_between(
         self,
-        *,
-        symbol: str,
         timeframe: str,
         start_at: datetime,
         end_at: datetime,
-    ) -> str:
-        return f"{symbol}|{timeframe}|{start_at.isoformat()}|{end_at.isoformat()}"
+    ) -> int:
+        step = self._timeframe_to_timedelta(timeframe)
+        seconds = max(0, int((end_at - start_at).total_seconds()))
+        step_seconds = max(1, int(step.total_seconds()))
+        return seconds // step_seconds
 
-    def _get_memory_cache(self, key: str) -> list[Candle] | None:
-        with self._lock:
-            item = self.__class__._memory_cache.get(key)
-            if item is None:
-                return None
-
-            expires_at, candles = item
-            if datetime.now(timezone.utc) >= expires_at:
-                self.__class__._memory_cache.pop(key, None)
-                return None
-
-            return candles
-
-    def _set_memory_cache(self, key: str, candles: list[Candle]) -> None:
-        ttl_seconds = 20
-        with self._lock:
-            self.__class__._memory_cache[key] = (
-                datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
-                candles,
-            )
-
-    def _load_local_candles(
-        self,
-        *,
-        session: Session,
-        symbol: str,
-        timeframe: str,
-        start_at: datetime,
-        end_at: datetime,
-    ) -> list[Candle]:
-        rows = self.query_repo.list_by_symbol_timeframe_range(
-            session=session,
-            symbol=symbol,
-            timeframe=timeframe,
-            start_at=start_at,
-            end_at=end_at,
-        )
-
-        candles: list[Candle] = []
-        for row in rows:
-            candles.append(
-                Candle(
-                    asset_id=row.asset_id,
-                    symbol=row.symbol,
-                    timeframe=row.timeframe,
-                    open_time=row.open_time,
-                    close_time=row.close_time,
-                    open=Decimal(str(row.open)),
-                    high=Decimal(str(row.high)),
-                    low=Decimal(str(row.low)),
-                    close=Decimal(str(row.close)),
-                    volume=Decimal(str(row.volume)),
-                    source=row.source,
-                )
-            )
-
-        return candles
-
-    def _persist_candles(self, *, session: Session, candles: list[Candle]) -> int:
-        persisted = 0
-
-        for candle in candles:
-            row = CandleModel(
-                asset_id=candle.asset_id,
-                symbol=candle.symbol,
-                timeframe=candle.timeframe,
-                open_time=self._ensure_naive_utc(candle.open_time),
-                close_time=self._ensure_naive_utc(candle.close_time),
-                open=candle.open,
-                high=candle.high,
-                low=candle.low,
-                close=candle.close,
-                volume=candle.volume,
-                source=candle.source,
-            )
-            session.add(row)
-
-            try:
-                session.commit()
-                persisted += 1
-            except IntegrityError:
-                session.rollback()
-
-        return persisted
-
-    def _normalize_provider_candle(
-        self,
-        *,
-        candle: Candle,
-        original_symbol: str,
-        timeframe: str,
-    ) -> Candle:
-        return Candle(
-            asset_id=candle.asset_id,
-            symbol=original_symbol,
-            timeframe=timeframe,
-            open_time=self._ensure_naive_utc(candle.open_time),
-            close_time=self._ensure_naive_utc(candle.close_time),
-            open=Decimal(str(candle.open)),
-            high=Decimal(str(candle.high)),
-            low=Decimal(str(candle.low)),
-            close=Decimal(str(candle.close)),
-            volume=Decimal(str(candle.volume)),
-            source=candle.source,
-        )
-
-    def _has_sufficient_local_coverage(
-        self,
-        *,
-        candles: list[Candle],
-        timeframe: str,
-        start_at: datetime,
-        end_at: datetime,
-    ) -> bool:
-        if not candles:
-            return False
-
-        first_open = min(self._ensure_naive_utc(item.open_time) for item in candles)
-        last_close = max(self._ensure_naive_utc(item.close_time) for item in candles)
-        tolerance = self._timeframe_delta(timeframe) * 2
-
-        return first_open <= start_at + tolerance and last_close >= end_at - tolerance
-
-    def _timeframe_delta(self, timeframe: str) -> timedelta:
+    def _timeframe_to_timedelta(self, timeframe: str) -> timedelta:
         mapping = {
             "1m": timedelta(minutes=1),
             "3m": timedelta(minutes=3),
@@ -339,35 +184,8 @@ class CandleSyncService:
             "1w": timedelta(weeks=1),
             "1mo": timedelta(days=30),
         }
-        return mapping.get(timeframe, timedelta(minutes=5))
 
-    def _map_symbol_for_provider(
-        self,
-        *,
-        symbol: str,
-        market_type: str | None,
-        catalog: str | None,
-    ) -> str:
-        market_type_value = (market_type or "").strip().lower()
-        catalog_value = (catalog or "").strip().lower()
+        if timeframe not in mapping:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
 
-        if market_type_value == "forex":
-            if "/" in symbol:
-                return symbol
-            if len(symbol) == 6:
-                return f"{symbol[:3]}/{symbol[3:]}"
-            return symbol
-
-        if market_type_value in {"cripto", "crypto"}:
-            if catalog_value == "spot":
-                if symbol.endswith("USDT") and len(symbol) > 4:
-                    return f"{symbol[:-4]}/USDT"
-                if symbol.endswith("USD") and len(symbol) > 3:
-                    return f"{symbol[:-3]}/USD"
-
-        return symbol
-
-    def _ensure_naive_utc(self, value: datetime) -> datetime:
-        if value.tzinfo is None:
-            return value
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return mapping[timeframe]

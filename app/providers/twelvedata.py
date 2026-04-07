@@ -1,8 +1,7 @@
-# app/providers/twelvedata.py
-
 import json
-import logging
-from datetime import datetime, timedelta
+import math
+import threading
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -12,10 +11,26 @@ from app.core.settings import get_settings
 from app.models.domain.candle import Candle
 from app.providers.base import BaseMarketDataProvider
 
-logger = logging.getLogger(__name__)
+
+class ProviderQuotaExceededError(ValueError):
+    pass
+
+
+class ProviderTemporaryCooldownError(ValueError):
+    pass
+
+
+def ensure_naive_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
 
 
 class TwelveDataProvider(BaseMarketDataProvider):
+    _cooldown_lock = threading.Lock()
+    _cooldown_until: datetime | None = None
+    _cooldown_reason: str = ""
+
     def __init__(self) -> None:
         self.settings = get_settings()
 
@@ -32,27 +47,26 @@ class TwelveDataProvider(BaseMarketDataProvider):
         if not self.settings.twelvedata_api_key:
             raise ValueError("Twelve Data API key is not configured")
 
-        provider_symbol = self._normalize_symbol_for_provider(symbol)
-        interval = self._map_timeframe_to_interval(timeframe)
+        self._raise_if_in_cooldown()
 
-        logger.info(
-            {
-                "event": "twelvedata_request_debug",
-                "original_symbol": symbol,
-                "provider_symbol": provider_symbol,
-                "timeframe": timeframe,
-                "interval": interval,
-                "start_at": start_at.isoformat(),
-                "end_at": end_at.isoformat(),
-            }
+        normalized_symbol = symbol.strip().upper()
+        normalized_timeframe = timeframe.strip().lower()
+        normalized_start_at = ensure_naive_utc(start_at)
+        normalized_end_at = ensure_naive_utc(end_at)
+
+        interval = self._map_timeframe_to_interval(normalized_timeframe)
+        outputsize = self._estimate_output_size(
+            timeframe=normalized_timeframe,
+            start_at=normalized_start_at,
+            end_at=normalized_end_at,
         )
 
         params = {
-            "symbol": provider_symbol,
+            "symbol": normalized_symbol,
             "interval": interval,
-            "start_date": start_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_date": end_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "outputsize": 5000,
+            "start_date": normalized_start_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_date": normalized_end_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "outputsize": outputsize,
             "order": "asc",
             "format": "JSON",
         }
@@ -79,53 +93,41 @@ class TwelveDataProvider(BaseMarketDataProvider):
                 payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             raw_body = exc.read().decode("utf-8", errors="replace")
-            logger.error(
-                {
-                    "event": "twelvedata_http_error",
-                    "status_code": exc.code,
-                    "symbol": symbol,
-                    "provider_symbol": provider_symbol,
-                    "timeframe": timeframe,
-                    "raw_body": raw_body,
-                }
-            )
             try:
                 error_payload = json.loads(raw_body)
-                message = error_payload.get("message", raw_body)
-                status = error_payload.get("status", "error")
-                code = error_payload.get("code", exc.code)
-                raise ValueError(
-                    f"Twelve Data API error ({code}, {status}): {message}"
-                ) from exc
             except json.JSONDecodeError:
-                raise ValueError(
-                    f"Twelve Data HTTP error {exc.code}: {raw_body}"
-                ) from exc
-        except URLError as exc:
-            logger.error(
-                {
-                    "event": "twelvedata_network_error",
-                    "symbol": symbol,
-                    "provider_symbol": provider_symbol,
-                    "timeframe": timeframe,
-                    "reason": str(exc.reason),
+                error_payload = {
+                    "code": exc.code,
+                    "status": "error",
+                    "message": raw_body or f"HTTP {exc.code}",
                 }
-            )
+
+            code = error_payload.get("code", exc.code)
+            status = error_payload.get("status", "error")
+            message = str(error_payload.get("message", raw_body)).strip()
+
+            if exc.code == 429 or str(code) == "429":
+                self._activate_cooldown(message)
+                raise ProviderQuotaExceededError(
+                    f"TwelveData error (429): {message}"
+                ) from exc
+
+            raise ValueError(
+                f"Twelve Data API error ({code}, {status}): {message}"
+            ) from exc
+        except URLError as exc:
             raise ValueError(f"Twelve Data network error: {exc.reason}") from exc
 
         if payload.get("status") == "error":
-            message = payload.get("message", "Unknown Twelve Data API error")
-            code = payload.get("code", "unknown")
-            logger.error(
-                {
-                    "event": "twelvedata_api_error",
-                    "symbol": symbol,
-                    "provider_symbol": provider_symbol,
-                    "timeframe": timeframe,
-                    "code": code,
-                    "message": message,
-                }
-            )
+            message = str(payload.get("message", "Unknown Twelve Data API error"))
+            code = str(payload.get("code", "unknown"))
+
+            if code == "429":
+                self._activate_cooldown(message)
+                raise ProviderQuotaExceededError(
+                    f"TwelveData error (429): {message}"
+                )
+
             raise ValueError(f"Twelve Data API error ({code}): {message}")
 
         values = payload.get("values", [])
@@ -135,12 +137,12 @@ class TwelveDataProvider(BaseMarketDataProvider):
         candles: list[Candle] = []
         for item in values:
             close_time = self._parse_twelvedata_datetime(item["datetime"])
-            open_time = self._infer_open_time(close_time, timeframe)
+            open_time = self._infer_open_time(close_time, normalized_timeframe)
 
             candles.append(
                 Candle(
-                    symbol=symbol,
-                    timeframe=timeframe,
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
                     open_time=open_time,
                     close_time=close_time,
                     open=Decimal(item["open"]),
@@ -152,32 +154,57 @@ class TwelveDataProvider(BaseMarketDataProvider):
                 )
             )
 
-        logger.info(
-            {
-                "event": "twelvedata_response_ok",
-                "symbol": symbol,
-                "provider_symbol": provider_symbol,
-                "timeframe": timeframe,
-                "candles_count": len(candles),
-            }
-        )
-
         return candles
 
-    def _normalize_symbol_for_provider(self, symbol: str) -> str:
-        normalized = symbol.strip().upper()
+    def _raise_if_in_cooldown(self) -> None:
+        with self._cooldown_lock:
+            if self._cooldown_until is None:
+                return
 
-        if "/" in normalized:
-            return normalized
+            now = datetime.utcnow()
+            if now >= self._cooldown_until:
+                self._cooldown_until = None
+                self._cooldown_reason = ""
+                return
 
-        if len(normalized) == 6 and normalized.isalpha():
-            return f"{normalized[:3]}/{normalized[3:]}"
+            raise ProviderTemporaryCooldownError(
+                self._cooldown_reason
+                or "Twelve Data provider is temporarily in cooldown after quota exhaustion."
+            )
 
-        return normalized
+    def _activate_cooldown(self, reason: str) -> None:
+        cooldown_minutes = max(1, self.settings.provider_quota_cooldown_minutes)
+        with self._cooldown_lock:
+            self._cooldown_until = datetime.utcnow() + timedelta(
+                minutes=cooldown_minutes
+            )
+            self._cooldown_reason = (
+                f"TwelveData quota cooldown active for {cooldown_minutes} minutes. "
+                f"Reason: {reason}"
+            )
+
+    def _estimate_output_size(
+        self,
+        timeframe: str,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> int:
+        step = self._timeframe_to_timedelta(timeframe)
+        total_seconds = max(0, (end_at - start_at).total_seconds())
+        bars = math.ceil(total_seconds / max(step.total_seconds(), 1))
+        bars = max(1, bars + 2)
+
+        if timeframe in {"1d", "1w", "1mo"}:
+            hard_cap = max(10, self.settings.candles_bootstrap_limit_daily)
+        else:
+            hard_cap = max(10, self.settings.candles_gap_fill_max_bars)
+
+        return min(bars, hard_cap)
 
     def _map_timeframe_to_interval(self, timeframe: str) -> str:
         mapping = {
             "1m": "1min",
+            "3m": "3min",
             "5m": "5min",
             "15m": "15min",
             "30m": "30min",
@@ -203,34 +230,33 @@ class TwelveDataProvider(BaseMarketDataProvider):
 
         for fmt in formats:
             try:
-                return datetime.strptime(value, fmt)
+                parsed = datetime.strptime(value, fmt)
+                return ensure_naive_utc(parsed)
             except ValueError:
                 continue
 
         raise ValueError(f"Unsupported datetime format from Twelve Data: {value}")
 
     def _infer_open_time(self, close_time: datetime, timeframe: str) -> datetime:
-        if timeframe == "1m":
-            return close_time - timedelta(minutes=1)
-        if timeframe == "5m":
-            return close_time - timedelta(minutes=5)
-        if timeframe == "15m":
-            return close_time - timedelta(minutes=15)
-        if timeframe == "30m":
-            return close_time - timedelta(minutes=30)
-        if timeframe == "45m":
-            return close_time - timedelta(minutes=45)
-        if timeframe == "1h":
-            return close_time - timedelta(hours=1)
-        if timeframe == "2h":
-            return close_time - timedelta(hours=2)
-        if timeframe == "4h":
-            return close_time - timedelta(hours=4)
-        if timeframe == "1d":
-            return close_time - timedelta(days=1)
-        if timeframe == "1w":
-            return close_time - timedelta(weeks=1)
-        if timeframe == "1mo":
-            return close_time - timedelta(days=30)
+        return close_time - self._timeframe_to_timedelta(timeframe)
 
-        raise ValueError(f"Unsupported timeframe for open_time inference: {timeframe}")
+    def _timeframe_to_timedelta(self, timeframe: str) -> timedelta:
+        mapping = {
+            "1m": timedelta(minutes=1),
+            "3m": timedelta(minutes=3),
+            "5m": timedelta(minutes=5),
+            "15m": timedelta(minutes=15),
+            "30m": timedelta(minutes=30),
+            "45m": timedelta(minutes=45),
+            "1h": timedelta(hours=1),
+            "2h": timedelta(hours=2),
+            "4h": timedelta(hours=4),
+            "1d": timedelta(days=1),
+            "1w": timedelta(weeks=1),
+            "1mo": timedelta(days=30),
+        }
+
+        if timeframe not in mapping:
+            raise ValueError(f"Unsupported timeframe delta: {timeframe}")
+
+        return mapping[timeframe]

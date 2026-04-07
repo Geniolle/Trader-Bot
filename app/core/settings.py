@@ -1,5 +1,3 @@
-# app/core/settings.py
-
 from functools import lru_cache
 
 from pydantic import Field
@@ -16,12 +14,17 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     timezone: str = Field(default="UTC")
 
-    market_data_provider: str = Field(default="twelvedata")
+    market_data_provider: str = Field(default="mock")
 
     twelvedata_api_key: str = Field(default="")
     twelvedata_base_url: str = Field(default="https://api.twelvedata.com")
 
     database_url: str = Field(default="sqlite:///./market_research_lab.db")
+
+    candles_bootstrap_limit_intraday: int = Field(default=240)
+    candles_bootstrap_limit_daily: int = Field(default=120)
+    candles_gap_fill_max_bars: int = Field(default=500)
+    provider_quota_cooldown_minutes: int = Field(default=30)
 
     model_config = SettingsConfigDict(
         env_file=".env",
