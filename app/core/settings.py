@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     candle_cache_sync_on_read: bool = Field(default=True)
     candle_cache_reconcile_bars: int = Field(default=2)
 
+    candles_gap_fill_max_bars: int = Field(default=5000)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
