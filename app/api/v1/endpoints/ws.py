@@ -17,8 +17,10 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_SECONDS = 15.0
-POLL_INTERVAL_SECONDS = 2.0
+POLL_INTERVAL_SECONDS = 5.0
+PROVIDER_QUOTA_COOLDOWN_SECONDS = 15 * 60
 DEFAULT_INTERNAL_API_BASE_URL = "http://127.0.0.1:8000/api/v1"
+DEFAULT_TWELVEDATA_BASE_URL = "https://api.twelvedata.com"
 
 
 @dataclass
@@ -29,11 +31,46 @@ class SubscriptionState:
     timeframe: str
 
 
+@dataclass
+class ProviderQuotaState:
+    exhausted_until: datetime | None = None
+    last_error_message: str | None = None
+
+    def is_exhausted(self) -> bool:
+        if self.exhausted_until is None:
+            return False
+        return _utc_now() < self.exhausted_until
+
+    def remaining_seconds(self) -> int:
+        if self.exhausted_until is None:
+            return 0
+        delta = self.exhausted_until - _utc_now()
+        return max(int(delta.total_seconds()), 0)
+
+    def mark_exhausted(self, message: str) -> None:
+        self.exhausted_until = _utc_now() + timedelta(
+            seconds=PROVIDER_QUOTA_COOLDOWN_SECONDS
+        )
+        self.last_error_message = message
+
+    def clear(self) -> None:
+        self.exhausted_until = None
+        self.last_error_message = None
+
+
 def _api_base_url() -> str:
     return (
         os.getenv("TRADERBOT_INTERNAL_API_BASE_URL", DEFAULT_INTERNAL_API_BASE_URL)
         .rstrip("/")
     )
+
+
+def _twelvedata_base_url() -> str:
+    return os.getenv("TWELVEDATA_BASE_URL", DEFAULT_TWELVEDATA_BASE_URL).rstrip("/")
+
+
+def _twelvedata_api_key() -> str:
+    return os.getenv("TWELVEDATA_API_KEY", "").strip()
 
 
 def _safe_json_dumps(payload: dict[str, Any]) -> str:
@@ -162,7 +199,74 @@ def _build_range(window: timedelta) -> tuple[str, str]:
     return start_at.isoformat(), end_at.isoformat()
 
 
-async def _fetch_candles(
+def _provider_symbol(symbol: str) -> str:
+    normalized = _normalize_symbol(symbol)
+
+    if "/" in normalized:
+        return normalized
+
+    if len(normalized) == 6 and normalized.isalpha():
+        return f"{normalized[:3]}/{normalized[3:]}"
+
+    return normalized
+
+
+def _provider_interval(timeframe: str) -> str:
+    mapping = {
+        "1m": "1min",
+        "3m": "3min",
+        "5m": "5min",
+        "15m": "15min",
+        "30m": "30min",
+        "1h": "1h",
+        "4h": "4h",
+        "1d": "1day",
+    }
+
+    normalized = _normalize_timeframe(timeframe)
+    return mapping.get(normalized, "5min")
+
+
+def _parse_provider_datetime(value: str) -> datetime:
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ]
+
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(value, fmt)
+            return parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+    raise ValueError(f"Unsupported provider datetime format: {value}")
+
+
+def _infer_open_time(close_time: datetime, timeframe: str) -> datetime:
+    normalized = _normalize_timeframe(timeframe)
+
+    if normalized == "1m":
+        return close_time - timedelta(minutes=1)
+    if normalized == "3m":
+        return close_time - timedelta(minutes=3)
+    if normalized == "5m":
+        return close_time - timedelta(minutes=5)
+    if normalized == "15m":
+        return close_time - timedelta(minutes=15)
+    if normalized == "30m":
+        return close_time - timedelta(minutes=30)
+    if normalized == "1h":
+        return close_time - timedelta(hours=1)
+    if normalized == "4h":
+        return close_time - timedelta(hours=4)
+    if normalized == "1d":
+        return close_time - timedelta(days=1)
+
+    return close_time - timedelta(minutes=5)
+
+
+async def _fetch_candles_from_internal_api(
     client: httpx.AsyncClient,
     *,
     symbol: str,
@@ -222,6 +326,113 @@ async def _fetch_candles(
 
     normalized_items.sort(key=lambda x: str(x.get("open_time") or ""))
     return normalized_items, None
+
+
+def _is_quota_error(message: str) -> bool:
+    normalized = message.lower()
+    return (
+        "run out of api credits" in normalized
+        or "credits for the day" in normalized
+        or "429" in normalized
+        or "quota" in normalized
+        or "limit being" in normalized
+    )
+
+
+async def _fetch_latest_candle_from_provider(
+    client: httpx.AsyncClient,
+    *,
+    symbol: str,
+    timeframe: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    api_key = _twelvedata_api_key()
+    if not api_key:
+        return None, "TWELVEDATA_API_KEY não configurada."
+
+    provider_symbol = _provider_symbol(symbol)
+    interval = _provider_interval(timeframe)
+
+    params = {
+        "symbol": provider_symbol,
+        "interval": interval,
+        "outputsize": "2",
+        "order": "asc",
+        "format": "JSON",
+    }
+
+    try:
+        response = await client.get(
+            f"{_twelvedata_base_url()}/time_series",
+            params=params,
+            headers={
+                "Authorization": f"apikey {api_key}",
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/136.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+                "Connection": "close",
+            },
+        )
+    except Exception as exc:
+        return None, f"Erro ao consultar provider: {exc}"
+
+    if response.status_code != 200:
+        return None, f"Provider HTTP {response.status_code}"
+
+    try:
+        payload = response.json()
+    except Exception as exc:
+        return None, f"Resposta inválida do provider: {exc}"
+
+    if payload.get("status") == "error":
+        message = payload.get("message", "Erro desconhecido no provider")
+        code = payload.get("code", "unknown")
+        return None, f"TwelveData error ({code}): {message}"
+
+    values = payload.get("values")
+    if not isinstance(values, list) or not values:
+        return None, "Provider não devolveu candles."
+
+    latest_raw = values[-1]
+    if not isinstance(latest_raw, dict):
+        return None, "Último candle do provider inválido."
+
+    provider_datetime = latest_raw.get("datetime")
+    if not isinstance(provider_datetime, str) or not provider_datetime.strip():
+        return None, "Provider não devolveu datetime do último candle."
+
+    try:
+        close_time = _parse_provider_datetime(provider_datetime)
+    except Exception as exc:
+        return None, str(exc)
+
+    open_time = _infer_open_time(close_time, timeframe)
+
+    candle = {
+        "id": None,
+        "asset_id": None,
+        "symbol": _normalize_symbol(symbol),
+        "timeframe": _normalize_timeframe(timeframe),
+        "open_time": open_time.isoformat(),
+        "close_time": close_time.isoformat(),
+        "open": str(latest_raw.get("open") or "0"),
+        "high": str(latest_raw.get("high") or "0"),
+        "low": str(latest_raw.get("low") or "0"),
+        "close": str(latest_raw.get("close") or "0"),
+        "volume": str(latest_raw.get("volume") or "0"),
+        "source": "twelvedata",
+        "provider": "twelvedata",
+        "market_session": None,
+        "timezone": "UTC",
+        "is_delayed": False,
+        "is_mock": False,
+        "count": 1,
+    }
+
+    return candle, None
 
 
 def _extract_tick_payload(
@@ -302,9 +513,11 @@ async def _subscription_stream_loop(
     stop_event: asyncio.Event,
     subscription: SubscriptionState,
 ) -> None:
-    base_url = _api_base_url()
+    internal_base_url = _api_base_url()
     last_signature = ""
+    last_known_candle: dict[str, Any] | None = None
     first_iteration = True
+    quota_state = ProviderQuotaState()
 
     logger.info(
         "websocket_subscription_start",
@@ -319,51 +532,270 @@ async def _subscription_stream_loop(
 
     timeout = httpx.Timeout(20.0, connect=10.0)
 
-    async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
-        while not stop_event.is_set():
-            mode = "full" if first_iteration else "incremental"
+    async with httpx.AsyncClient(base_url=internal_base_url, timeout=timeout) as internal_client:
+        async with httpx.AsyncClient(timeout=timeout) as provider_client:
+            while not stop_event.is_set():
+                if first_iteration:
+                    candles, error_message = await _fetch_candles_from_internal_api(
+                        internal_client,
+                        symbol=subscription.symbol,
+                        timeframe=subscription.timeframe,
+                        mode="full",
+                    )
 
-            candles, error_message = await _fetch_candles(
-                client,
-                symbol=subscription.symbol,
-                timeframe=subscription.timeframe,
-                mode=mode,
-            )
+                    if error_message:
+                        ok = await _safe_send_json(
+                            websocket,
+                            {
+                                "event": "provider_error",
+                                "data": {
+                                    "symbol": subscription.symbol,
+                                    "timeframe": subscription.timeframe,
+                                    "message": error_message,
+                                },
+                            },
+                        )
+                        if not ok:
+                            stop_event.set()
+                            break
 
-            if error_message:
-                ok = await _safe_send_json(
-                    websocket,
-                    {
-                        "event": "provider_error",
-                        "data": {
+                        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                        continue
+
+                    ok = await _safe_send_json(
+                        websocket,
+                        {
+                            "event": "initial_candles",
+                            "data": {
+                                "symbol": subscription.symbol,
+                                "timeframe": subscription.timeframe,
+                                "candles": candles,
+                            },
+                        },
+                    )
+                    if not ok:
+                        stop_event.set()
+                        break
+
+                    ok = await _safe_send_json(
+                        websocket,
+                        {
+                            "event": "candles_refresh",
+                            "data": {
+                                "symbol": subscription.symbol,
+                                "timeframe": subscription.timeframe,
+                                "count": len(candles),
+                                "reason": "initial_load",
+                                "poll_seconds": POLL_INTERVAL_SECONDS,
+                                "latest_open_time": (
+                                    candles[-1].get("open_time") if candles else None
+                                ),
+                            },
+                        },
+                    )
+                    if not ok:
+                        stop_event.set()
+                        break
+
+                    if candles:
+                        last_known_candle = candles[-1]
+                        last_signature = _candle_signature(last_known_candle)
+
+                    logger.info(
+                        "websocket_initial_candles_sent",
+                        extra={
                             "symbol": subscription.symbol,
                             "timeframe": subscription.timeframe,
-                            "message": error_message,
+                            "count": len(candles),
+                            "last_signature": last_signature,
                         },
-                    },
-                )
-                if not ok:
-                    stop_event.set()
-                    break
+                    )
 
-                await asyncio.sleep(POLL_INTERVAL_SECONDS)
-                continue
+                    first_iteration = False
+                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    continue
 
-            if first_iteration:
-                ok = await _safe_send_json(
-                    websocket,
-                    {
-                        "event": "initial_candles",
-                        "data": {
+                if quota_state.is_exhausted():
+                    latest_open_time = (
+                        str(last_known_candle.get("open_time") or "")
+                        if last_known_candle
+                        else ""
+                    )
+
+                    logger.warning(
+                        "websocket_provider_quota_cooldown_active",
+                        extra={
                             "symbol": subscription.symbol,
                             "timeframe": subscription.timeframe,
-                            "candles": candles,
+                            "remaining_seconds": quota_state.remaining_seconds(),
                         },
+                    )
+
+                    ok = await _safe_send_json(
+                        websocket,
+                        {
+                            "event": "candles_refresh",
+                            "data": {
+                                "symbol": subscription.symbol,
+                                "timeframe": subscription.timeframe,
+                                "count": 1 if last_known_candle else 0,
+                                "reason": "provider_quota_exhausted",
+                                "poll_seconds": POLL_INTERVAL_SECONDS,
+                                "latest_open_time": latest_open_time,
+                                "cooldown_seconds": quota_state.remaining_seconds(),
+                            },
+                        },
+                    )
+                    if not ok:
+                        stop_event.set()
+                        break
+
+                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+
+                latest_candle, provider_error = await _fetch_latest_candle_from_provider(
+                    provider_client,
+                    symbol=subscription.symbol,
+                    timeframe=subscription.timeframe,
+                )
+
+                if provider_error:
+                    logger.warning(
+                        "websocket_provider_latest_failed",
+                        extra={
+                            "symbol": subscription.symbol,
+                            "timeframe": subscription.timeframe,
+                            "error": provider_error,
+                        },
+                    )
+
+                    if _is_quota_error(provider_error):
+                        quota_state.mark_exhausted(provider_error)
+
+                        ok = await _safe_send_json(
+                            websocket,
+                            {
+                                "event": "provider_error",
+                                "data": {
+                                    "symbol": subscription.symbol,
+                                    "timeframe": subscription.timeframe,
+                                    "message": provider_error,
+                                },
+                            },
+                        )
+                        if not ok:
+                            stop_event.set()
+                            break
+
+                        latest_open_time = (
+                            str(last_known_candle.get("open_time") or "")
+                            if last_known_candle
+                            else ""
+                        )
+
+                        ok = await _safe_send_json(
+                            websocket,
+                            {
+                                "event": "candles_refresh",
+                                "data": {
+                                    "symbol": subscription.symbol,
+                                    "timeframe": subscription.timeframe,
+                                    "count": 1 if last_known_candle else 0,
+                                    "reason": "provider_quota_exhausted",
+                                    "poll_seconds": POLL_INTERVAL_SECONDS,
+                                    "latest_open_time": latest_open_time,
+                                    "cooldown_seconds": quota_state.remaining_seconds(),
+                                },
+                            },
+                        )
+                        if not ok:
+                            stop_event.set()
+                            break
+
+                        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                        continue
+
+                    latest_open_time = (
+                        str(last_known_candle.get("open_time") or "")
+                        if last_known_candle
+                        else ""
+                    )
+
+                    ok = await _safe_send_json(
+                        websocket,
+                        {
+                            "event": "provider_error",
+                            "data": {
+                                "symbol": subscription.symbol,
+                                "timeframe": subscription.timeframe,
+                                "message": provider_error,
+                            },
+                        },
+                    )
+                    if not ok:
+                        stop_event.set()
+                        break
+
+                    ok = await _safe_send_json(
+                        websocket,
+                        {
+                            "event": "candles_refresh",
+                            "data": {
+                                "symbol": subscription.symbol,
+                                "timeframe": subscription.timeframe,
+                                "count": 1 if last_known_candle else 0,
+                                "reason": "provider_latest_failed",
+                                "poll_seconds": POLL_INTERVAL_SECONDS,
+                                "latest_open_time": latest_open_time,
+                            },
+                        },
+                    )
+                    if not ok:
+                        stop_event.set()
+                        break
+
+                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+
+                quota_state.clear()
+
+                latest_signature = _candle_signature(latest_candle)
+                latest_open_time = (
+                    str(latest_candle.get("open_time") or "") if latest_candle else ""
+                )
+
+                candle_changed = bool(
+                    latest_candle and latest_signature and latest_signature != last_signature
+                )
+
+                logger.info(
+                    "websocket_incremental_poll",
+                    extra={
+                        "symbol": subscription.symbol,
+                        "timeframe": subscription.timeframe,
+                        "latest_open_time": latest_open_time,
+                        "changed": candle_changed,
                     },
                 )
-                if not ok:
-                    stop_event.set()
-                    break
+
+                if candle_changed and latest_candle:
+                    ok = await _safe_send_json(
+                        websocket,
+                        {
+                            "event": "candle_tick",
+                            "data": _extract_tick_payload(
+                                latest_candle,
+                                symbol=subscription.symbol,
+                                timeframe=subscription.timeframe,
+                            ),
+                        },
+                    )
+                    if not ok:
+                        stop_event.set()
+                        break
+
+                    last_known_candle = latest_candle
+                    last_signature = latest_signature
 
                 ok = await _safe_send_json(
                     websocket,
@@ -372,9 +804,14 @@ async def _subscription_stream_loop(
                         "data": {
                             "symbol": subscription.symbol,
                             "timeframe": subscription.timeframe,
-                            "count": len(candles),
-                            "reason": "initial_load",
+                            "count": 1 if latest_candle else 0,
+                            "reason": (
+                                "provider_latest_candle_updated"
+                                if candle_changed
+                                else "provider_poll_no_change"
+                            ),
                             "poll_seconds": POLL_INTERVAL_SECONDS,
+                            "latest_open_time": latest_open_time,
                         },
                     },
                 )
@@ -382,85 +819,7 @@ async def _subscription_stream_loop(
                     stop_event.set()
                     break
 
-                if candles:
-                    last_signature = _candle_signature(candles[-1])
-
-                logger.info(
-                    "websocket_initial_candles_sent",
-                    extra={
-                        "symbol": subscription.symbol,
-                        "timeframe": subscription.timeframe,
-                        "count": len(candles),
-                        "last_signature": last_signature,
-                    },
-                )
-
-                first_iteration = False
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
-                continue
-
-            latest_candle = candles[-1] if candles else None
-            latest_signature = _candle_signature(latest_candle)
-            latest_open_time = (
-                str(latest_candle.get("open_time") or "") if latest_candle else ""
-            )
-
-            candle_changed = bool(
-                latest_candle and latest_signature and latest_signature != last_signature
-            )
-
-            logger.info(
-                "websocket_incremental_poll",
-                extra={
-                    "symbol": subscription.symbol,
-                    "timeframe": subscription.timeframe,
-                    "count": len(candles),
-                    "latest_open_time": latest_open_time,
-                    "changed": candle_changed,
-                },
-            )
-
-            if candle_changed:
-                ok = await _safe_send_json(
-                    websocket,
-                    {
-                        "event": "candle_tick",
-                        "data": _extract_tick_payload(
-                            latest_candle,
-                            symbol=subscription.symbol,
-                            timeframe=subscription.timeframe,
-                        ),
-                    },
-                )
-                if not ok:
-                    stop_event.set()
-                    break
-
-                last_signature = latest_signature
-
-            ok = await _safe_send_json(
-                websocket,
-                {
-                    "event": "candles_refresh",
-                    "data": {
-                        "symbol": subscription.symbol,
-                        "timeframe": subscription.timeframe,
-                        "count": len(candles),
-                        "reason": (
-                            "latest_candle_updated"
-                            if candle_changed
-                            else "incremental_poll_no_change"
-                        ),
-                        "poll_seconds": POLL_INTERVAL_SECONDS,
-                        "latest_open_time": latest_open_time,
-                    },
-                },
-            )
-            if not ok:
-                stop_event.set()
-                break
-
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     logger.info(
         "websocket_subscription_end",
