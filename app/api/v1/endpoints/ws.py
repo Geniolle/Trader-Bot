@@ -1,5 +1,3 @@
-# app/api/v1/endpoints/ws.py
-
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +17,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_SECONDS = 15.0
-POLL_INTERVAL_SECONDS = 5.0
+POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_INTERNAL_API_BASE_URL = "http://127.0.0.1:8000/api/v1"
 
 
@@ -150,7 +148,7 @@ def _window_for_full_load(timeframe: str) -> timedelta:
 
 def _window_for_incremental_load(timeframe: str) -> timedelta:
     minutes = _timeframe_to_minutes(timeframe)
-    bars = max(50, 12)
+    bars = 50
     return timedelta(minutes=minutes * bars)
 
 
@@ -208,15 +206,18 @@ async def _fetch_candles(
     for item in items:
         if not isinstance(item, dict):
             continue
+
         open_time = item.get("open_time")
         timeframe_value = item.get("timeframe")
         symbol_value = item.get("symbol")
+
         if not isinstance(open_time, str):
             continue
         if not isinstance(timeframe_value, str):
             continue
         if not isinstance(symbol_value, str):
             continue
+
         normalized_items.append(item)
 
     normalized_items.sort(key=lambda x: str(x.get("open_time") or ""))
@@ -250,6 +251,7 @@ def _extract_tick_payload(
 def _candle_signature(candle: dict[str, Any] | None) -> str:
     if not candle:
         return ""
+
     parts = [
         str(candle.get("open_time") or ""),
         str(candle.get("open") or ""),
@@ -311,6 +313,7 @@ async def _subscription_stream_loop(
             "timeframe": subscription.timeframe,
             "market_type": subscription.market_type,
             "catalog": subscription.catalog,
+            "poll_interval_seconds": POLL_INTERVAL_SECONDS,
         },
     )
 
@@ -319,6 +322,7 @@ async def _subscription_stream_loop(
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
         while not stop_event.is_set():
             mode = "full" if first_iteration else "incremental"
+
             candles, error_message = await _fetch_candles(
                 client,
                 symbol=subscription.symbol,
@@ -370,6 +374,7 @@ async def _subscription_stream_loop(
                             "timeframe": subscription.timeframe,
                             "count": len(candles),
                             "reason": "initial_load",
+                            "poll_seconds": POLL_INTERVAL_SECONDS,
                         },
                     },
                 )
@@ -380,14 +385,42 @@ async def _subscription_stream_loop(
                 if candles:
                     last_signature = _candle_signature(candles[-1])
 
+                logger.info(
+                    "websocket_initial_candles_sent",
+                    extra={
+                        "symbol": subscription.symbol,
+                        "timeframe": subscription.timeframe,
+                        "count": len(candles),
+                        "last_signature": last_signature,
+                    },
+                )
+
                 first_iteration = False
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
                 continue
 
             latest_candle = candles[-1] if candles else None
             latest_signature = _candle_signature(latest_candle)
+            latest_open_time = (
+                str(latest_candle.get("open_time") or "") if latest_candle else ""
+            )
 
-            if latest_candle and latest_signature and latest_signature != last_signature:
+            candle_changed = bool(
+                latest_candle and latest_signature and latest_signature != last_signature
+            )
+
+            logger.info(
+                "websocket_incremental_poll",
+                extra={
+                    "symbol": subscription.symbol,
+                    "timeframe": subscription.timeframe,
+                    "count": len(candles),
+                    "latest_open_time": latest_open_time,
+                    "changed": candle_changed,
+                },
+            )
+
+            if candle_changed:
                 ok = await _safe_send_json(
                     websocket,
                     {
@@ -403,23 +436,29 @@ async def _subscription_stream_loop(
                     stop_event.set()
                     break
 
-                ok = await _safe_send_json(
-                    websocket,
-                    {
-                        "event": "candles_refresh",
-                        "data": {
-                            "symbol": subscription.symbol,
-                            "timeframe": subscription.timeframe,
-                            "count": len(candles),
-                            "reason": "latest_candle_updated",
-                        },
-                    },
-                )
-                if not ok:
-                    stop_event.set()
-                    break
-
                 last_signature = latest_signature
+
+            ok = await _safe_send_json(
+                websocket,
+                {
+                    "event": "candles_refresh",
+                    "data": {
+                        "symbol": subscription.symbol,
+                        "timeframe": subscription.timeframe,
+                        "count": len(candles),
+                        "reason": (
+                            "latest_candle_updated"
+                            if candle_changed
+                            else "incremental_poll_no_change"
+                        ),
+                        "poll_seconds": POLL_INTERVAL_SECONDS,
+                        "latest_open_time": latest_open_time,
+                    },
+                },
+            )
+            if not ok:
+                stop_event.set()
+                break
 
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
@@ -435,6 +474,7 @@ async def _subscription_stream_loop(
 async def _stop_task(task: asyncio.Task | None) -> None:
     if not task:
         return
+
     task.cancel()
     with suppress(asyncio.CancelledError):
         await task
@@ -565,6 +605,7 @@ async def websocket_feed(websocket: WebSocket) -> None:
                         "catalog": catalog,
                         "symbol": symbol,
                         "timeframe": timeframe,
+                        "poll_seconds": POLL_INTERVAL_SECONDS,
                     },
                 },
             )
