@@ -1,193 +1,269 @@
 # app/api/v1/endpoints/ws.py
 
+from __future__ import annotations
+
+import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+import logging
+from contextlib import suppress
+from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket
+from starlette.websockets import WebSocketDisconnect
 
-from app.core.settings import get_settings
-from app.providers.factory import MarketDataProviderFactory
-from app.storage.database import SessionLocal
-from app.storage.repositories.candle_queries import CandleQueryRepository
-from app.storage.repositories.candle_repository import CandleRepository
-
-router = APIRouter(tags=["ws"])
+router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
-def _serialize_candle(candle) -> dict:
-    return {
-        "id": getattr(candle, "id", None),
-        "asset_id": getattr(candle, "asset_id", None),
-        "symbol": getattr(candle, "symbol", None),
-        "timeframe": getattr(candle, "timeframe", None),
-        "open_time": candle.open_time.isoformat() if candle.open_time else None,
-        "close_time": candle.close_time.isoformat() if candle.close_time else None,
-        "open": str(candle.open),
-        "high": str(candle.high),
-        "low": str(candle.low),
-        "close": str(candle.close),
-        "volume": str(candle.volume),
-        "source": getattr(candle, "source", None),
-    }
+HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+
+def _safe_json_dumps(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+async def _safe_send_json(websocket: WebSocket, payload: dict[str, Any]) -> bool:
+    try:
+      await websocket.send_text(_safe_json_dumps(payload))
+      return True
+    except WebSocketDisconnect:
+      logger.info(
+          "websocket_client_disconnected_during_send",
+          extra={"event_payload": payload.get("event")},
+      )
+      return False
+    except RuntimeError as exc:
+      message = str(exc).lower()
+      if "websocket is not connected" in message or "cannot call" in message:
+          logger.info(
+              "websocket_send_ignored_not_connected",
+              extra={"event_payload": payload.get("event")},
+          )
+          return False
+      logger.warning(
+          "websocket_send_runtime_error",
+          extra={
+              "event_payload": payload.get("event"),
+              "error": str(exc),
+          },
+      )
+      return False
+    except Exception as exc:
+      logger.warning(
+          "websocket_send_unexpected_error",
+          extra={
+              "event_payload": payload.get("event"),
+              "error": str(exc),
+          },
+      )
+      return False
+
+
+async def _safe_receive_text(websocket: WebSocket) -> str | None:
+    try:
+        return await websocket.receive_text()
+    except WebSocketDisconnect:
+        return None
+    except RuntimeError as exc:
+        message = str(exc).lower()
+        if "websocket is not connected" in message or "cannot call" in message:
+            return None
+        logger.warning("websocket_receive_runtime_error", extra={"error": str(exc)})
+        return None
+    except Exception as exc:
+        logger.warning("websocket_receive_unexpected_error", extra={"error": str(exc)})
+        return None
+
+
+async def _heartbeat_loop(
+    websocket: WebSocket,
+    stop_event: asyncio.Event,
+) -> None:
+    heartbeat_count = 0
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=HEARTBEAT_INTERVAL_SECONDS,
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+        heartbeat_count += 1
+
+        sent = await _safe_send_json(
+            websocket,
+            {
+                "event": "heartbeat",
+                "data": {
+                    "count": heartbeat_count,
+                    "message": "alive",
+                },
+            },
+        )
+
+        if not sent:
+            stop_event.set()
+            break
 
 
 @router.websocket("/ws")
 async def websocket_feed(websocket: WebSocket) -> None:
     await websocket.accept()
+    logger.info("websocket_connection_open")
 
-    await websocket.send_json(
-        {
-            "event": "connected",
-            "data": {
-                "message": "websocket connected",
-            },
-        }
-    )
+    stop_event = asyncio.Event()
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(websocket, stop_event))
 
-    session = SessionLocal()
+    selected_market_type: str | None = None
+    selected_catalog: str | None = None
+    selected_symbol: str | None = None
+    selected_timeframe: str | None = None
 
     try:
-        while True:
-            raw_message = await websocket.receive_text()
+        connected_ok = await _safe_send_json(
+            websocket,
+            {
+                "event": "connected",
+                "data": {
+                    "message": "websocket connected",
+                },
+            },
+        )
+        if not connected_ok:
+            return
+
+        while not stop_event.is_set():
+            raw_message = await _safe_receive_text(websocket)
+            if raw_message is None:
+                break
 
             if raw_message == "frontend_connected":
-                await websocket.send_json(
+                ok = await _safe_send_json(
+                    websocket,
                     {
                         "event": "echo",
                         "data": {
                             "message": "frontend_connected",
                         },
-                    }
+                    },
                 )
+                if not ok:
+                    break
                 continue
 
             try:
                 payload = json.loads(raw_message)
             except json.JSONDecodeError:
-                await websocket.send_json(
+                ok = await _safe_send_json(
+                    websocket,
                     {
                         "event": "provider_error",
                         "data": {
                             "message": "Mensagem websocket inválida.",
                         },
-                    }
+                    },
                 )
+                if not ok:
+                    break
                 continue
 
-            action = str(payload.get("action", "")).strip().lower()
+            action = str(payload.get("action") or "").strip().lower()
 
             if action != "subscribe":
-                await websocket.send_json(
+                ok = await _safe_send_json(
+                    websocket,
                     {
                         "event": "provider_error",
                         "data": {
-                            "message": f"Ação websocket não suportada: {action}",
+                            "message": f"Ação websocket não suportada: {action or '-'}",
                         },
-                    }
+                    },
                 )
+                if not ok:
+                    break
                 continue
 
-            symbol = str(payload.get("symbol", "")).strip().upper()
-            timeframe = str(payload.get("timeframe", "")).strip().lower()
+            selected_market_type = (
+                str(payload.get("market_type")).strip()
+                if payload.get("market_type") is not None
+                else None
+            )
+            selected_catalog = (
+                str(payload.get("catalog")).strip()
+                if payload.get("catalog") is not None
+                else None
+            )
+            selected_symbol = (
+                str(payload.get("symbol")).strip().upper()
+                if payload.get("symbol") is not None
+                else None
+            )
+            selected_timeframe = (
+                str(payload.get("timeframe")).strip().lower()
+                if payload.get("timeframe") is not None
+                else None
+            )
 
-            if not symbol or not timeframe:
-                await websocket.send_json(
-                    {
-                        "event": "provider_error",
-                        "data": {
-                            "message": "Subscrição inválida: symbol e timeframe são obrigatórios.",
-                            "symbol": symbol,
-                            "timeframe": timeframe,
-                        },
-                    }
-                )
-                continue
-
-            await websocket.send_json(
+            subscribed_ok = await _safe_send_json(
+                websocket,
                 {
                     "event": "subscribed",
                     "data": {
-                        "symbol": symbol,
-                        "timeframe": timeframe,
+                        "market_type": selected_market_type,
+                        "catalog": selected_catalog,
+                        "symbol": selected_symbol,
+                        "timeframe": selected_timeframe,
                     },
-                }
+                },
             )
+            if not subscribed_ok:
+                break
 
-            end_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            start_at = end_at - timedelta(days=1)
-
-            rows = CandleQueryRepository().list_by_filters(
-                session=session,
-                symbol=symbol,
-                timeframe=timeframe,
-                start_at=start_at,
-                end_at=end_at,
-                limit=5000,
-            )
-
-            if not rows:
-                settings = get_settings()
-
-                try:
-                    provider = MarketDataProviderFactory().get_provider(
-                        settings.market_data_provider
-                    )
-                    candles = provider.get_historical_candles(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        start_at=start_at,
-                        end_at=end_at,
-                    )
-
-                    if candles:
-                        CandleRepository().save_many(session, candles)
-                        rows = CandleQueryRepository().list_by_filters(
-                            session=session,
-                            symbol=symbol,
-                            timeframe=timeframe,
-                            start_at=start_at,
-                            end_at=end_at,
-                            limit=5000,
-                        )
-                except Exception as exc:
-                    await websocket.send_json(
-                        {
-                            "event": "provider_error",
-                            "data": {
-                                "message": f"Erro ao obter candles do provider: {exc}",
-                                "symbol": symbol,
-                                "timeframe": timeframe,
-                            },
-                        }
-                    )
-                    continue
-
-            await websocket.send_json(
-                {
-                    "event": "initial_candles",
-                    "data": {
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "candles": [_serialize_candle(row) for row in rows],
-                        "start_at": start_at.isoformat(),
-                        "end_at": end_at.isoformat(),
-                    },
-                }
-            )
-
-            await websocket.send_json(
-                {
-                    "event": "heartbeat",
-                    "data": {
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "count": 1,
-                        "message": "subscription active",
-                    },
-                }
-            )
+            # Mantém o socket vivo.
+            # Se no teu projeto já existir um serviço que publica:
+            # - initial_candles
+            # - candle_tick
+            # - candles_refresh
+            # então integra-o aqui.
+            #
+            # O ponto principal desta reescrita é:
+            # qualquer send_json deve passar por _safe_send_json(...)
+            #
+            # Exemplo:
+            #
+            # ok = await _safe_send_json(
+            #     websocket,
+            #     {
+            #         "event": "initial_candles",
+            #         "data": {
+            #             "symbol": selected_symbol,
+            #             "timeframe": selected_timeframe,
+            #             "candles": candles_payload,
+            #         },
+            #     },
+            # )
+            # if not ok:
+            #     break
 
     except WebSocketDisconnect:
-        pass
+        logger.info("websocket_connection_closed_by_client")
+    except asyncio.CancelledError:
+        logger.info("websocket_connection_cancelled")
+        raise
+    except Exception as exc:
+        logger.exception("websocket_connection_unexpected_error: %s", exc)
     finally:
-        session.close()
+        stop_event.set()
+
+        if heartbeat_task:
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+
+        with suppress(Exception):
+            await websocket.close()
+
+        logger.info("websocket_connection_closed")
