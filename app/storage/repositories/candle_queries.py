@@ -1,12 +1,7 @@
-from datetime import UTC, datetime
+from datetime import datetime
 
 from app.storage.models import CandleModel
-
-
-def ensure_naive_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value
-    return value.astimezone(UTC).replace(tzinfo=None)
+from app.utils.datetime_utils import ensure_naive_utc
 
 
 class CandleQueryRepository:
@@ -56,4 +51,20 @@ class CandleQueryRepository:
             .order_by(CandleModel.open_time.asc(), CandleModel.id.asc())
             .limit(limit)
             .all()
+        )
+
+    def get_latest_by_symbol_timeframe(
+        self,
+        session,
+        symbol: str,
+        timeframe: str,
+    ) -> CandleModel | None:
+        return (
+            session.query(CandleModel)
+            .filter(
+                CandleModel.symbol == symbol,
+                CandleModel.timeframe == timeframe,
+            )
+            .order_by(CandleModel.open_time.desc(), CandleModel.id.desc())
+            .first()
         )

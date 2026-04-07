@@ -1,15 +1,10 @@
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 
 from app.models.domain.candle import Candle
 from app.storage.models import CandleModel
-
-
-def ensure_naive_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value
-    return value.astimezone(UTC).replace(tzinfo=None)
+from app.utils.datetime_utils import ensure_naive_utc
 
 
 class CandleRepository:
@@ -18,6 +13,7 @@ class CandleRepository:
 
         for candle in candles:
             normalized_open_time = ensure_naive_utc(candle.open_time)
+            normalized_close_time = ensure_naive_utc(candle.close_time)
 
             db_existing = self.get_by_unique_key(
                 session=session,
@@ -28,7 +24,7 @@ class CandleRepository:
 
             if db_existing is not None:
                 db_existing.asset_id = candle.asset_id
-                db_existing.close_time = ensure_naive_utc(candle.close_time)
+                db_existing.close_time = normalized_close_time
                 db_existing.open = candle.open
                 db_existing.high = candle.high
                 db_existing.low = candle.low
@@ -45,7 +41,7 @@ class CandleRepository:
                 symbol=candle.symbol,
                 timeframe=candle.timeframe,
                 open_time=normalized_open_time,
-                close_time=ensure_naive_utc(candle.close_time),
+                close_time=normalized_close_time,
                 open=candle.open,
                 high=candle.high,
                 low=candle.low,
@@ -68,7 +64,7 @@ class CandleRepository:
                 )
                 if db_existing is not None:
                     db_existing.asset_id = candle.asset_id
-                    db_existing.close_time = ensure_naive_utc(candle.close_time)
+                    db_existing.close_time = normalized_close_time
                     db_existing.open = candle.open
                     db_existing.high = candle.high
                     db_existing.low = candle.low
@@ -121,21 +117,5 @@ class CandleRepository:
                 CandleModel.timeframe == timeframe,
             )
             .order_by(CandleModel.open_time.desc(), CandleModel.id.desc())
-            .first()
-        )
-
-    def get_earliest(
-        self,
-        session,
-        symbol: str,
-        timeframe: str,
-    ) -> CandleModel | None:
-        return (
-            session.query(CandleModel)
-            .filter(
-                CandleModel.symbol == symbol,
-                CandleModel.timeframe == timeframe,
-            )
-            .order_by(CandleModel.open_time.asc(), CandleModel.id.asc())
             .first()
         )

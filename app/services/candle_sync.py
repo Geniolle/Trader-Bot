@@ -1,16 +1,11 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 
 from app.core.settings import get_settings
 from app.providers.factory import MarketDataProviderFactory
 from app.storage.repositories.candle_queries import CandleQueryRepository
 from app.storage.repositories.candle_repository import CandleRepository
-
-
-def ensure_naive_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value
-    return value.astimezone(UTC).replace(tzinfo=None)
+from app.utils.datetime_utils import ensure_naive_utc, timeframe_to_timedelta
 
 
 @dataclass
@@ -76,7 +71,7 @@ class CandleSyncService:
             bootstrap_start = max(
                 normalized_start_at,
                 normalized_end_at
-                - (self._timeframe_to_timedelta(normalized_timeframe) * bootstrap_limit),
+                - (timeframe_to_timedelta(normalized_timeframe) * bootstrap_limit),
             )
 
             candles = provider.get_historical_candles(
@@ -132,7 +127,7 @@ class CandleSyncService:
             gap_start = max(
                 normalized_start_at,
                 normalized_end_at
-                - (self._timeframe_to_timedelta(normalized_timeframe) * max_gap_bars),
+                - (timeframe_to_timedelta(normalized_timeframe) * max_gap_bars),
             )
 
         candles = provider.get_historical_candles(
@@ -164,28 +159,7 @@ class CandleSyncService:
         start_at: datetime,
         end_at: datetime,
     ) -> int:
-        step = self._timeframe_to_timedelta(timeframe)
+        step = timeframe_to_timedelta(timeframe)
         seconds = max(0, int((end_at - start_at).total_seconds()))
         step_seconds = max(1, int(step.total_seconds()))
         return seconds // step_seconds
-
-    def _timeframe_to_timedelta(self, timeframe: str) -> timedelta:
-        mapping = {
-            "1m": timedelta(minutes=1),
-            "3m": timedelta(minutes=3),
-            "5m": timedelta(minutes=5),
-            "15m": timedelta(minutes=15),
-            "30m": timedelta(minutes=30),
-            "45m": timedelta(minutes=45),
-            "1h": timedelta(hours=1),
-            "2h": timedelta(hours=2),
-            "4h": timedelta(hours=4),
-            "1d": timedelta(days=1),
-            "1w": timedelta(weeks=1),
-            "1mo": timedelta(days=30),
-        }
-
-        if timeframe not in mapping:
-            raise ValueError(f"Unsupported timeframe: {timeframe}")
-
-        return mapping[timeframe]
