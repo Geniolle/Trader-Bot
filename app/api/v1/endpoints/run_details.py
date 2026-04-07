@@ -43,6 +43,8 @@ def get_run_details(run_id: str) -> RunDetailsResponse:
             total_candles_processed=run_row.total_candles_processed,
             total_cases_opened=run_row.total_cases_opened,
             total_cases_closed=run_row.total_cases_closed,
+            candles_count=run_row.total_candles_processed,
+            cases_count=run_row.total_cases_closed,
             started_at=run_row.started_at,
             finished_at=run_row.finished_at,
         )

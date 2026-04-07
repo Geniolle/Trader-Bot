@@ -1,3 +1,5 @@
+# app/schemas/run.py
+
 from datetime import datetime
 from decimal import Decimal
 
@@ -36,7 +38,7 @@ class CandleResponse(BaseModel):
 class CandleListResponse(BaseModel):
     symbol: str
     timeframe: str
-    mode: str
+    mode: str = "full"
     count: int
     start_at: datetime
     end_at: datetime
@@ -59,6 +61,8 @@ class StrategyRunResponse(BaseModel):
     total_candles_processed: int
     total_cases_opened: int
     total_cases_closed: int
+    candles_count: int = 0
+    cases_count: int = 0
     started_at: datetime | None = None
     finished_at: datetime | None = None
 
@@ -124,6 +128,8 @@ def build_run_response(run: StrategyRun) -> StrategyRunResponse:
         total_candles_processed=run.total_candles_processed,
         total_cases_opened=run.total_cases_opened,
         total_cases_closed=run.total_cases_closed,
+        candles_count=run.total_candles_processed,
+        cases_count=run.total_cases_closed,
         started_at=run.started_at,
         finished_at=run.finished_at,
     )
