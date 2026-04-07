@@ -1,100 +1,190 @@
+# app/api/v1/endpoints/catalog.py
+
 from fastapi import APIRouter, HTTPException
 
-from app.core.instrument_catalog import InstrumentCatalogService
 from app.schemas.catalog import (
-    CatalogItemListResponse,
-    CatalogProductListResponse,
+    CatalogInstrumentResponse,
+    CatalogItemsResponse,
     CatalogProductResponse,
+    CatalogProductsResponse,
     CatalogProductSummaryResponse,
+    CatalogSubproductResponse,
 )
 
 router = APIRouter(prefix="/catalog", tags=["catalog"])
 
 
-def _count_product_items(product: dict) -> int:
-    total = 0
-    for subproduct in product["subproducts"]:
-        total += len(subproduct["items"])
-    return total
+CATALOG_DATA = {
+    "forex": {
+        "label": "Forex",
+        "description": "Mercado cambial",
+        "subproducts": {
+            "major": {
+                "label": "Major",
+                "description": "Pares principais do Forex",
+                "items": [
+                    {
+                        "symbol": "EURUSD",
+                        "display_name": "EUR/USD",
+                        "base_asset": "EUR",
+                        "quote_asset": "USD",
+                    },
+                    {
+                        "symbol": "GBPUSD",
+                        "display_name": "GBP/USD",
+                        "base_asset": "GBP",
+                        "quote_asset": "USD",
+                    },
+                    {
+                        "symbol": "USDJPY",
+                        "display_name": "USD/JPY",
+                        "base_asset": "USD",
+                        "quote_asset": "JPY",
+                    },
+                    {
+                        "symbol": "AUDUSD",
+                        "display_name": "AUD/USD",
+                        "base_asset": "AUD",
+                        "quote_asset": "USD",
+                    },
+                    {
+                        "symbol": "USDCAD",
+                        "display_name": "USD/CAD",
+                        "base_asset": "USD",
+                        "quote_asset": "CAD",
+                    },
+                    {
+                        "symbol": "USDCHF",
+                        "display_name": "USD/CHF",
+                        "base_asset": "USD",
+                        "quote_asset": "CHF",
+                    },
+                    {
+                        "symbol": "NZDUSD",
+                        "display_name": "NZD/USD",
+                        "base_asset": "NZD",
+                        "quote_asset": "USD",
+                    },
+                ],
+            }
+        },
+    },
+    "crypto": {
+        "label": "Crypto",
+        "description": "Mercado de criptomoedas",
+        "subproducts": {
+            "spot": {
+                "label": "Spot",
+                "description": "Mercado spot de criptoativos",
+                "items": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "display_name": "BTC/USDT",
+                        "base_asset": "BTC",
+                        "quote_asset": "USDT",
+                    },
+                    {
+                        "symbol": "ETHUSDT",
+                        "display_name": "ETH/USDT",
+                        "base_asset": "ETH",
+                        "quote_asset": "USDT",
+                    },
+                    {
+                        "symbol": "SOLUSDT",
+                        "display_name": "SOL/USDT",
+                        "base_asset": "SOL",
+                        "quote_asset": "USDT",
+                    },
+                ],
+            }
+        },
+    },
+}
 
 
-@router.get("/products", response_model=CatalogProductListResponse)
-def list_products() -> CatalogProductListResponse:
-    service = InstrumentCatalogService()
-    products = service.list_products()
+def _build_products_response() -> CatalogProductsResponse:
+    products: list[CatalogProductSummaryResponse] = []
 
-    response_items = [
-        CatalogProductSummaryResponse(
-            code=product["code"],
-            label=product["label"],
-            description=product["description"],
-            total_subproducts=len(product["subproducts"]),
-            total_items=_count_product_items(product),
+    for product_code, product_data in CATALOG_DATA.items():
+        subproducts = product_data["subproducts"]
+        total_items = sum(len(subproduct["items"]) for subproduct in subproducts.values())
+
+        products.append(
+            CatalogProductSummaryResponse(
+                code=product_code,
+                label=product_data["label"],
+                description=product_data["description"],
+                total_subproducts=len(subproducts),
+                total_items=total_items,
+            )
         )
-        for product in products
-    ]
 
-    return CatalogProductListResponse(products=response_items)
+    products.sort(key=lambda item: item.label.lower())
+    return CatalogProductsResponse(products=products)
+
+
+@router.get("/products", response_model=CatalogProductsResponse)
+def list_products() -> CatalogProductsResponse:
+    return _build_products_response()
 
 
 @router.get("/products/{product_code}", response_model=CatalogProductResponse)
 def get_product(product_code: str) -> CatalogProductResponse:
-    service = InstrumentCatalogService()
-    product = service.get_product(product_code)
+    product = CATALOG_DATA.get(product_code)
 
     if product is None:
         raise HTTPException(status_code=404, detail=f"Product not found: {product_code}")
 
-    return CatalogProductResponse(**product)
+    subproducts = [
+        CatalogSubproductResponse(
+            code=subproduct_code,
+            label=subproduct_data["label"],
+            description=subproduct_data["description"],
+        )
+        for subproduct_code, subproduct_data in product["subproducts"].items()
+    ]
+    subproducts.sort(key=lambda item: item.label.lower())
 
-
-@router.get("/products/{product_code}/items", response_model=CatalogItemListResponse)
-def list_product_items(product_code: str) -> CatalogItemListResponse:
-    service = InstrumentCatalogService()
-    product = service.get_product(product_code)
-
-    if product is None:
-        raise HTTPException(status_code=404, detail=f"Product not found: {product_code}")
-
-    items = service.list_items(product_code=product_code)
-
-    return CatalogItemListResponse(
-        product=product_code.lower(),
-        subproduct=None,
-        total_items=len(items),
-        items=items,
+    return CatalogProductResponse(
+        code=product_code,
+        label=product["label"],
+        description=product["description"],
+        subproducts=subproducts,
     )
 
 
 @router.get(
     "/products/{product_code}/subproducts/{subproduct_code}",
-    response_model=CatalogItemListResponse,
+    response_model=CatalogItemsResponse,
 )
-def list_subproduct_items(
-    product_code: str,
-    subproduct_code: str,
-) -> CatalogItemListResponse:
-    service = InstrumentCatalogService()
-    product = service.get_product(product_code)
+def get_subproduct_items(product_code: str, subproduct_code: str) -> CatalogItemsResponse:
+    product = CATALOG_DATA.get(product_code)
 
     if product is None:
         raise HTTPException(status_code=404, detail=f"Product not found: {product_code}")
 
-    subproduct = service.get_subproduct(product_code, subproduct_code)
+    subproduct = product["subproducts"].get(subproduct_code)
+
     if subproduct is None:
         raise HTTPException(
             status_code=404,
             detail=f"Subproduct not found: {product_code}/{subproduct_code}",
         )
 
-    items = service.list_items(
-        product_code=product_code,
-        subproduct_code=subproduct_code,
-    )
+    items = [
+        CatalogInstrumentResponse(
+            symbol=item["symbol"],
+            display_name=item["display_name"],
+            base_asset=item["base_asset"],
+            quote_asset=item["quote_asset"],
+        )
+        for item in subproduct["items"]
+    ]
+    items.sort(key=lambda item: item.display_name.lower())
 
-    return CatalogItemListResponse(
-        product=product_code.lower(),
-        subproduct=subproduct_code.lower(),
+    return CatalogItemsResponse(
+        product=product_code,
+        subproduct=subproduct_code,
         total_items=len(items),
         items=items,
     )

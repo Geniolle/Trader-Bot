@@ -1,25 +1,6 @@
+# app/schemas/catalog.py
+
 from pydantic import BaseModel
-
-
-class CatalogInstrumentResponse(BaseModel):
-    symbol: str
-    display_name: str
-    base_asset: str
-    quote_asset: str
-
-
-class CatalogSubproductResponse(BaseModel):
-    code: str
-    label: str
-    description: str
-    items: list[CatalogInstrumentResponse]
-
-
-class CatalogProductResponse(BaseModel):
-    code: str
-    label: str
-    description: str
-    subproducts: list[CatalogSubproductResponse]
 
 
 class CatalogProductSummaryResponse(BaseModel):
@@ -30,12 +11,32 @@ class CatalogProductSummaryResponse(BaseModel):
     total_items: int
 
 
-class CatalogProductListResponse(BaseModel):
+class CatalogProductsResponse(BaseModel):
     products: list[CatalogProductSummaryResponse]
 
 
-class CatalogItemListResponse(BaseModel):
+class CatalogSubproductResponse(BaseModel):
+    code: str
+    label: str
+    description: str
+
+
+class CatalogProductResponse(BaseModel):
+    code: str
+    label: str
+    description: str
+    subproducts: list[CatalogSubproductResponse]
+
+
+class CatalogInstrumentResponse(BaseModel):
+    symbol: str
+    display_name: str
+    base_asset: str
+    quote_asset: str
+
+
+class CatalogItemsResponse(BaseModel):
     product: str
-    subproduct: str | None
+    subproduct: str | None = None
     total_items: int
     items: list[CatalogInstrumentResponse]
