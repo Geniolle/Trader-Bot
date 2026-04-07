@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     candle_cache_reconcile_bars: int = Field(default=2)
 
     candles_gap_fill_max_bars: int = Field(default=5000)
+    provider_quota_cooldown_minutes: int = Field(default=60)
 
     model_config = SettingsConfigDict(
         env_file=".env",
