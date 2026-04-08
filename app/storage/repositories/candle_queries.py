@@ -9,15 +9,14 @@ from app.storage.models import Candle
 
 
 class CandleQueryRepository:
-    def list_candles(
+    def _build_stmt(
         self,
-        session: Session,
         symbol: str,
         timeframe: str,
         start_at: datetime | None = None,
         end_at: datetime | None = None,
         limit: int | None = None,
-    ) -> list[Candle]:
+    ):
         stmt = (
             select(Candle)
             .where(Candle.symbol == symbol)
@@ -34,4 +33,40 @@ class CandleQueryRepository:
         if limit is not None:
             stmt = stmt.limit(limit)
 
+        return stmt
+
+    def list_by_filters(
+        self,
+        session: Session,
+        symbol: str,
+        timeframe: str,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Candle]:
+        stmt = self._build_stmt(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_at=start_at,
+            end_at=end_at,
+            limit=limit,
+        )
         return list(session.scalars(stmt).all())
+
+    def list_candles(
+        self,
+        session: Session,
+        symbol: str,
+        timeframe: str,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Candle]:
+        return self.list_by_filters(
+            session=session,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_at=start_at,
+            end_at=end_at,
+            limit=limit,
+        )

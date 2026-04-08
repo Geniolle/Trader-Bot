@@ -1,9 +1,17 @@
+from __future__ import annotations
+
 import os
 import shlex
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote, urlparse
+
+from app.core.logging import get_logger
+from app.core.settings import get_settings
+
+logger = get_logger(__name__)
 
 
 def utc_now_iso() -> str:
@@ -20,19 +28,58 @@ def normalize_symbol(symbol: str) -> str:
 
 
 def get_db_path() -> str:
-    db_path = os.getenv("DB_PATH", "").strip()
-    if not db_path:
-        raise RuntimeError("DB_PATH não configurado.")
-    return db_path
+    settings = get_settings()
+
+    env_db_path = os.getenv("DB_PATH", "").strip()
+    if env_db_path:
+        logger.info("[STAGE_TESTS] DB_PATH encontrado no ambiente: %s", env_db_path)
+        return env_db_path
+
+    database_url = (settings.database_url or "").strip()
+    logger.info("[STAGE_TESTS] database_url lida das settings: %s", database_url)
+
+    if not database_url:
+        raise RuntimeError("database_url não configurada.")
+
+    if database_url.startswith("sqlite:///"):
+        raw_path = database_url.replace("sqlite:///", "", 1)
+        raw_path = unquote(raw_path).strip()
+
+        if not raw_path:
+            raise RuntimeError("database_url SQLite inválida.")
+
+        logger.info("[STAGE_TESTS] DB path derivado de database_url: %s", raw_path)
+        return raw_path
+
+    parsed = urlparse(database_url)
+    if parsed.scheme == "sqlite":
+        raw_path = unquote(parsed.path or "").strip()
+        if raw_path.startswith("/"):
+            raw_path = raw_path[1:]
+
+        if not raw_path:
+            raise RuntimeError("database_url SQLite inválida.")
+
+        logger.info("[STAGE_TESTS] DB path derivado via urlparse: %s", raw_path)
+        return raw_path
+
+    raise RuntimeError(
+        "Stage Tests suporta apenas SQLite neste momento. "
+        f"database_url atual: {database_url}"
+    )
 
 
 def connect_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(get_db_path())
+    db_path = get_db_path()
+    logger.info("[STAGE_TESTS] A abrir ligação SQLite: %s", db_path)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def list_stage_test_options(min_candles: int = 1) -> dict[str, Any]:
+    logger.info("[STAGE_TESTS] list_stage_test_options | min_candles=%s", min_candles)
+
     sql = """
     SELECT
         UPPER(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '/', ''), '-', ''), '_', ''), ' ', '')) AS normalized_symbol,
@@ -65,6 +112,8 @@ def list_stage_test_options(min_candles: int = 1) -> dict[str, Any]:
             }
         )
 
+    logger.info("[STAGE_TESTS] options carregadas | total=%s", len(items))
+
     return {
         "items": items,
         "refreshed_at": utc_now_iso(),
@@ -73,6 +122,13 @@ def list_stage_test_options(min_candles: int = 1) -> dict[str, Any]:
 
 def validate_symbol_timeframe(symbol: str, timeframe: str, min_candles: int = 1) -> None:
     normalized = normalize_symbol(symbol)
+
+    logger.info(
+        "[STAGE_TESTS] validate_symbol_timeframe | symbol=%s | timeframe=%s | min_candles=%s",
+        normalized,
+        timeframe,
+        min_candles,
+    )
 
     sql = """
     SELECT COUNT(*) AS total
@@ -85,6 +141,11 @@ def validate_symbol_timeframe(symbol: str, timeframe: str, min_candles: int = 1)
         row = conn.execute(sql, (normalized, timeframe)).fetchone()
 
     total = int(row["total"]) if row else 0
+
+    logger.info(
+        "[STAGE_TESTS] validate_symbol_timeframe | encontrados=%s",
+        total,
+    )
 
     if total < min_candles:
         raise ValueError(
@@ -122,6 +183,7 @@ def build_stage_test_command(
     if extra_args:
         command.extend(extra_args)
 
+    logger.info("[STAGE_TESTS] command=%s", command)
     return command
 
 
@@ -133,6 +195,15 @@ def run_stage_test(
     extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
     extra_args = extra_args or []
+
+    logger.info(
+        "[STAGE_TESTS] run_stage_test | symbol=%s | timeframe=%s | strategy=%s | min_candles=%s | extra_args=%s",
+        symbol,
+        timeframe,
+        strategy,
+        min_candles,
+        extra_args,
+    )
 
     validate_symbol_timeframe(
         symbol=symbol,
@@ -153,6 +224,12 @@ def run_stage_test(
         text=True,
         encoding="utf-8",
         errors="replace",
+    )
+
+    logger.info(
+        "[STAGE_TESTS] run concluído | return_code=%s | ok=%s",
+        result.returncode,
+        result.returncode == 0,
     )
 
     return {

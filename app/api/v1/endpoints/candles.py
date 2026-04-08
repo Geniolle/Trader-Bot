@@ -1,60 +1,123 @@
-from __future__ import annotations
+from datetime import datetime
 
-from typing import Any
+from fastapi import APIRouter, HTTPException, Query
 
-from app.core.logging import get_logger
-from app.storage.cache_models import CandleCoverageModel
+from app.providers.twelvedata import ProviderQuotaExceededError
+from app.schemas.run import CandleResponse
+from app.services.candle_cache_sync import CandleCacheSyncService
+from app.storage.database import SessionLocal
+from app.storage.repositories.candle_queries import CandleQueryRepository
 
-logger = get_logger(__name__)
+router = APIRouter(prefix="/candles", tags=["candles"])
 
 
-class CandleCacheSyncService:
-    def __init__(self) -> None:
-        logger.info("###################################################################################")
-        logger.info("[CANDLE_CACHE_SYNC] INIT")
-        logger.info(
-            "[CANDLE_CACHE_SYNC] COVERAGE_MODEL=%s",
-            CandleCoverageModel.__name__,
+@router.get("", response_model=list[CandleResponse])
+def list_candles(
+    symbol: str = Query(...),
+    timeframe: str = Query(...),
+    start_at: datetime = Query(...),
+    end_at: datetime = Query(...),
+    limit: int = Query(default=500, ge=1, le=5000),
+    mode: str = Query(default="full"),
+    sync: bool = Query(default=True),
+) -> list[CandleResponse]:
+    normalized_symbol = symbol.strip().upper()
+    normalized_timeframe = timeframe.strip().lower()
+
+    print("###################################################################################")
+    print("[CANDLES] INICIO")
+    print(f"[CANDLES] SYMBOL={normalized_symbol}")
+    print(f"[CANDLES] TIMEFRAME={normalized_timeframe}")
+    print(f"[CANDLES] START_AT={start_at}")
+    print(f"[CANDLES] END_AT={end_at}")
+    print(f"[CANDLES] LIMIT={limit}")
+    print(f"[CANDLES] MODE={mode}")
+    print(f"[CANDLES] SYNC={sync}")
+
+    session = SessionLocal()
+    try:
+        try:
+            if sync:
+                print("[CANDLES] A chamar CandleCacheSyncService.ensure_range()")
+                CandleCacheSyncService().ensure_range(
+                    session=session,
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    start_at=start_at,
+                    end_at=end_at,
+                    limit=limit,
+                    sync=sync,
+                    mode=mode,
+                )
+                print("[CANDLES] ensure_range() concluído sem exceção")
+        except ProviderQuotaExceededError as exc:
+            print("[CANDLES] ProviderQuotaExceededError capturada")
+            print(f"[CANDLES] ERRO_QUOTA={exc}")
+
+            cached_rows = CandleQueryRepository().list_by_filters(
+                session=session,
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                start_at=start_at,
+                end_at=end_at,
+                limit=limit,
+            )
+
+            print(f"[CANDLES] CACHE_ROWS={len(cached_rows)}")
+
+            if cached_rows:
+                print("[CANDLES] A devolver cache local")
+                return [
+                    CandleResponse(
+                        id=row.id,
+                        asset_id=row.asset_id,
+                        symbol=row.symbol,
+                        timeframe=row.timeframe,
+                        open_time=row.open_time,
+                        close_time=row.close_time,
+                        open=row.open,
+                        high=row.high,
+                        low=row.low,
+                        close=row.close,
+                        volume=row.volume,
+                        source=row.source,
+                    )
+                    for row in cached_rows
+                ]
+
+            print("[CANDLES] Sem cache local, a devolver HTTP 429")
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+        print("[CANDLES] A consultar base local após sync")
+        rows = CandleQueryRepository().list_by_filters(
+            session=session,
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            start_at=start_at,
+            end_at=end_at,
+            limit=limit,
         )
-        logger.info(
-            "[CANDLE_CACHE_SYNC] COVERAGE_TABLE=%s",
-            getattr(CandleCoverageModel, "__tablename__", "N/A"),
-        )
-        logger.info("###################################################################################")
 
-    def ensure_range(
-        self,
-        session: Any,
-        symbol: str,
-        timeframe: str,
-        start_at: Any,
-        end_at: Any,
-        limit: int = 5000,
-        sync: bool = True,
-        **kwargs: Any,
-    ) -> int:
-        logger.info("###################################################################################")
-        logger.info("[CANDLE_CACHE_SYNC] INICIO")
-        logger.info("[CANDLE_CACHE_SYNC] SESSION_PRESENT=%s", session is not None)
-        logger.info("[CANDLE_CACHE_SYNC] SYMBOL=%s", symbol)
-        logger.info("[CANDLE_CACHE_SYNC] TIMEFRAME=%s", timeframe)
-        logger.info("[CANDLE_CACHE_SYNC] START_AT=%s", start_at)
-        logger.info("[CANDLE_CACHE_SYNC] END_AT=%s", end_at)
-        logger.info("[CANDLE_CACHE_SYNC] LIMIT=%s", limit)
-        logger.info("[CANDLE_CACHE_SYNC] SYNC=%s", sync)
-        logger.info("[CANDLE_CACHE_SYNC] EXTRA_KWARGS=%s", sorted(kwargs.keys()))
-        logger.info(
-            "[CANDLE_CACHE_SYNC] COVERAGE_MODEL=%s",
-            CandleCoverageModel.__name__,
-        )
-        logger.info(
-            "[CANDLE_CACHE_SYNC] COVERAGE_TABLE=%s",
-            getattr(CandleCoverageModel, "__tablename__", "N/A"),
-        )
+        print(f"[CANDLES] ROWS_FINAL={len(rows)}")
 
-        total_written = 0
-
-        logger.info("[CANDLE_CACHE_SYNC] TOTAL_WRITTEN=%s", total_written)
-        logger.info("[CANDLE_CACHE_SYNC] FIM")
-        logger.info("###################################################################################")
-        return total_written
+        return [
+            CandleResponse(
+                id=row.id,
+                asset_id=row.asset_id,
+                symbol=row.symbol,
+                timeframe=row.timeframe,
+                open_time=row.open_time,
+                close_time=row.close_time,
+                open=row.open,
+                high=row.high,
+                low=row.low,
+                close=row.close,
+                volume=row.volume,
+                source=row.source,
+            )
+            for row in rows
+        ]
+    finally:
+        print("[CANDLES] FIM")
+        print("###################################################################################")
+        session.close()
