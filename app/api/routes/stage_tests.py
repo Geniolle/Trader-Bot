@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException, Query
-
 from app.schemas.stage_tests import (
     StageTestOptionsResponse,
     StageTestRunRequest,
@@ -10,7 +9,7 @@ from app.services.stage_tests_service import (
     run_stage_test,
 )
 
-router = APIRouter()
+router = APIRouter(prefix="/api/stage-tests", tags=["stage-tests"])
 
 
 @router.get("/options", response_model=StageTestOptionsResponse)

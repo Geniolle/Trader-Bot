@@ -1,31 +1,35 @@
-from datetime import datetime
+from typing import List
 
-from pydantic import BaseModel
-
-
-class StageTestLatestRunResponse(BaseModel):
-    run_id: str | None = None
-    status: str | None = None
-    symbol: str | None = None
-    timeframe: str | None = None
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+from pydantic import BaseModel, Field
 
 
-class StageTestSummaryResponse(BaseModel):
-    strategy_key: str
-    strategy_name: str
-    strategy_description: str | None = None
-    strategy_category: str | None = None
+class StageTestOptionItem(BaseModel):
+    symbol: str
+    timeframe: str
+    candles_count: int
+    first_candle: str
+    last_candle: str
 
-    total_runs: int = 0
-    total_cases: int = 0
-    total_hits: int = 0
-    total_fails: int = 0
-    total_timeouts: int = 0
 
-    hit_rate: float = 0
-    fail_rate: float = 0
-    timeout_rate: float = 0
+class StageTestOptionsResponse(BaseModel):
+    items: List[StageTestOptionItem]
+    refreshed_at: str
 
-    last_run: StageTestLatestRunResponse | None = None
+
+class StageTestRunRequest(BaseModel):
+    symbol: str = Field(..., min_length=1)
+    timeframe: str = Field(..., min_length=1)
+    strategy: str = Field(default="default", min_length=1)
+    min_candles: int = Field(default=1, ge=1)
+    extra_args: List[str] = Field(default_factory=list)
+
+
+class StageTestRunResponse(BaseModel):
+    ok: bool
+    command: List[str]
+    symbol: str
+    timeframe: str
+    strategy: str
+    stdout: str
+    stderr: str
+    return_code: int

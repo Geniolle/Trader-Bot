@@ -8,6 +8,7 @@ from app.storage.database import Base, engine
 
 import app.storage.models  # noqa: F401
 
+
 setup_logging()
 
 settings = get_settings()
@@ -39,3 +40,10 @@ def on_startup() -> None:
     logger.info("Application starting")
     logger.info("Environment: %s", settings.app_env)
     logger.info("Timezone: %s", settings.timezone)
+    logger.info("App name: %s", settings.app_name)
+    logger.info("Debug: %s", settings.app_debug)
+
+
+@app.get("/health", tags=["health"])
+def health() -> dict[str, bool]:
+    return {"ok": True}
