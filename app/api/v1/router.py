@@ -16,34 +16,20 @@ from app.api.v1.endpoints.ws import router as ws_router
 
 api_router = APIRouter(prefix="/api/v1")
 
-# Base / health
-api_router.include_router(
-    health_router,
-    tags=["health"],
-)
-
-# Catalog / configuration
+api_router.include_router(health_router, tags=["health"])
 api_router.include_router(catalog_router)
-api_router.include_router(providers_router)
-api_router.include_router(strategies_router)
-
-# Stage tests
 api_router.include_router(
     stage_tests_router,
     prefix="/stage-tests",
     tags=["stage-tests"],
 )
-
-# Runs
+api_router.include_router(strategies_router)
 api_router.include_router(runs_router)
 api_router.include_router(batch_runs_router)
+api_router.include_router(providers_router)
 api_router.include_router(run_history_router)
 api_router.include_router(run_metrics_router)
 api_router.include_router(run_cases_router)
 api_router.include_router(run_details_router)
-
-# Market data
 api_router.include_router(candles_router)
-
-# Realtime / websocket
 api_router.include_router(ws_router)

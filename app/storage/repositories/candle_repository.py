@@ -1,121 +1,52 @@
+from __future__ import annotations
+
 from datetime import datetime
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from app.models.domain.candle import Candle
-from app.storage.models import CandleModel
-from app.utils.datetime_utils import ensure_naive_utc
+from app.storage.models import Candle
 
 
 class CandleRepository:
-    def save_many(self, session, candles: list[Candle]) -> list[CandleModel]:
-        saved_items: list[CandleModel] = []
-
-        for candle in candles:
-            normalized_open_time = ensure_naive_utc(candle.open_time)
-            normalized_close_time = ensure_naive_utc(candle.close_time)
-
-            db_existing = self.get_by_unique_key(
-                session=session,
-                symbol=candle.symbol,
-                timeframe=candle.timeframe,
-                open_time=normalized_open_time,
-            )
-
-            if db_existing is not None:
-                db_existing.asset_id = candle.asset_id
-                db_existing.close_time = normalized_close_time
-                db_existing.open = candle.open
-                db_existing.high = candle.high
-                db_existing.low = candle.low
-                db_existing.close = candle.close
-                db_existing.volume = candle.volume
-                db_existing.source = candle.source
-                session.add(db_existing)
-                session.flush()
-                saved_items.append(db_existing)
-                continue
-
-            db_obj = CandleModel(
-                asset_id=candle.asset_id,
-                symbol=candle.symbol,
-                timeframe=candle.timeframe,
-                open_time=normalized_open_time,
-                close_time=normalized_close_time,
-                open=candle.open,
-                high=candle.high,
-                low=candle.low,
-                close=candle.close,
-                volume=candle.volume,
-                source=candle.source,
-            )
-
-            session.add(db_obj)
-            try:
-                session.flush()
-                saved_items.append(db_obj)
-            except IntegrityError:
-                session.rollback()
-                db_existing = self.get_by_unique_key(
-                    session=session,
-                    symbol=candle.symbol,
-                    timeframe=candle.timeframe,
-                    open_time=normalized_open_time,
-                )
-                if db_existing is not None:
-                    db_existing.asset_id = candle.asset_id
-                    db_existing.close_time = normalized_close_time
-                    db_existing.open = candle.open
-                    db_existing.high = candle.high
-                    db_existing.low = candle.low
-                    db_existing.close = candle.close
-                    db_existing.volume = candle.volume
-                    db_existing.source = candle.source
-                    session.add(db_existing)
-                    session.flush()
-                    saved_items.append(db_existing)
-
-        session.commit()
-
-        for item in saved_items:
-            try:
-                session.refresh(item)
-            except Exception:
-                pass
-
-        return saved_items
-
-    def get_by_unique_key(
+    def get_by_symbol_timeframe_open_time(
         self,
-        session,
+        session: Session,
         symbol: str,
         timeframe: str,
         open_time: datetime,
-    ) -> CandleModel | None:
-        normalized_open_time = ensure_naive_utc(open_time)
-
-        return (
-            session.query(CandleModel)
-            .filter(
-                CandleModel.symbol == symbol,
-                CandleModel.timeframe == timeframe,
-                CandleModel.open_time == normalized_open_time,
-            )
-            .first()
+    ) -> Candle | None:
+        stmt = (
+            select(Candle)
+            .where(Candle.symbol == symbol)
+            .where(Candle.timeframe == timeframe)
+            .where(Candle.open_time == open_time)
         )
+        return session.scalar(stmt)
 
-    def get_latest(
+    def list_by_range(
         self,
-        session,
+        session: Session,
         symbol: str,
         timeframe: str,
-    ) -> CandleModel | None:
-        return (
-            session.query(CandleModel)
-            .filter(
-                CandleModel.symbol == symbol,
-                CandleModel.timeframe == timeframe,
-            )
-            .order_by(CandleModel.open_time.desc(), CandleModel.id.desc())
-            .first()
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Candle]:
+        stmt = (
+            select(Candle)
+            .where(Candle.symbol == symbol)
+            .where(Candle.timeframe == timeframe)
+            .order_by(Candle.open_time.asc())
         )
+
+        if start_at is not None:
+            stmt = stmt.where(Candle.open_time >= start_at)
+
+        if end_at is not None:
+            stmt = stmt.where(Candle.open_time <= end_at)
+
+        if limit is not None:
+            stmt = stmt.limit(limit)
+
+        return list(session.scalars(stmt).all())

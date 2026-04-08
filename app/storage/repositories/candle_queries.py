@@ -1,70 +1,37 @@
+from __future__ import annotations
+
 from datetime import datetime
 
-from app.storage.models import CandleModel
-from app.utils.datetime_utils import ensure_naive_utc
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.storage.models import Candle
 
 
 class CandleQueryRepository:
-    def list_by_symbol_timeframe_range(
+    def list_candles(
         self,
-        session,
+        session: Session,
         symbol: str,
         timeframe: str,
-        start_at,
-        end_at,
-    ) -> list[CandleModel]:
-        normalized_start_at = ensure_naive_utc(start_at)
-        normalized_end_at = ensure_naive_utc(end_at)
-
-        return (
-            session.query(CandleModel)
-            .filter(
-                CandleModel.symbol == symbol,
-                CandleModel.timeframe == timeframe,
-                CandleModel.open_time >= normalized_start_at,
-                CandleModel.close_time <= normalized_end_at,
-            )
-            .order_by(CandleModel.open_time.asc(), CandleModel.id.asc())
-            .all()
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Candle]:
+        stmt = (
+            select(Candle)
+            .where(Candle.symbol == symbol)
+            .where(Candle.timeframe == timeframe)
+            .order_by(Candle.open_time.asc())
         )
 
-    def list_by_filters(
-        self,
-        session,
-        symbol: str,
-        timeframe: str,
-        start_at,
-        end_at,
-        limit: int = 500,
-    ) -> list[CandleModel]:
-        normalized_start_at = ensure_naive_utc(start_at)
-        normalized_end_at = ensure_naive_utc(end_at)
+        if start_at is not None:
+            stmt = stmt.where(Candle.open_time >= start_at)
 
-        return (
-            session.query(CandleModel)
-            .filter(
-                CandleModel.symbol == symbol,
-                CandleModel.timeframe == timeframe,
-                CandleModel.open_time >= normalized_start_at,
-                CandleModel.close_time <= normalized_end_at,
-            )
-            .order_by(CandleModel.open_time.asc(), CandleModel.id.asc())
-            .limit(limit)
-            .all()
-        )
+        if end_at is not None:
+            stmt = stmt.where(Candle.open_time <= end_at)
 
-    def get_latest_by_symbol_timeframe(
-        self,
-        session,
-        symbol: str,
-        timeframe: str,
-    ) -> CandleModel | None:
-        return (
-            session.query(CandleModel)
-            .filter(
-                CandleModel.symbol == symbol,
-                CandleModel.timeframe == timeframe,
-            )
-            .order_by(CandleModel.open_time.desc(), CandleModel.id.desc())
-            .first()
-        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+
+        return list(session.scalars(stmt).all())

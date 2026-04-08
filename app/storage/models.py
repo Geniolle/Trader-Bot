@@ -1,19 +1,17 @@
-from datetime import datetime
-from decimal import Decimal
-from uuid import uuid4
+from __future__ import annotations
 
-from sqlalchemy import DateTime, Integer, Numeric, String, Text, UniqueConstraint
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.storage.database import Base
 
 
-def generate_uuid() -> str:
-    return str(uuid4())
-
-
-class CandleModel(Base):
+class Candle(Base):
     __tablename__ = "candles"
+
     __table_args__ = (
         UniqueConstraint(
             "symbol",
@@ -23,102 +21,94 @@ class CandleModel(Base):
         ),
     )
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    asset_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
-    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
-
-    open_time: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    close_time: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-
-    open: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-    high: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-    low: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-    close: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-    volume: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("0"))
-
-    source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    asset_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    timeframe: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    open_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    close_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    open: Mapped[float] = mapped_column(Float, nullable=False)
+    high: Mapped[float] = mapped_column(Float, nullable=False)
+    low: Mapped[float] = mapped_column(Float, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
-class StrategyRunModel(Base):
+class CandleCoverage(Base):
+    __tablename__ = "candle_coverages"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    timeframe: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    start_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    end_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class StrategyRun(Base):
     __tablename__ = "strategy_runs"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    strategy_key: Mapped[str] = mapped_column(String(100), nullable=False, default="")
-    strategy_config_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    mode: Mapped[str] = mapped_column(String(50), nullable=False)
-    asset_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
-    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
-
-    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-
-    status: Mapped[str] = mapped_column(String(50), nullable=False)
-    total_candles_processed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_cases_opened: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_cases_closed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    strategy_name: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    symbol: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    timeframe: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    status: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class StrategyCaseModel(Base):
-    __tablename__ = "strategy_cases"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    run_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    strategy_config_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    asset_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
-    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
-
-    trigger_time: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    trigger_candle_time: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    entry_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-
-    target_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-    invalidation_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-    timeout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-
-    status: Mapped[str] = mapped_column(String(50), nullable=False)
-    outcome: Mapped[str | None] = mapped_column(String(50), nullable=True)
-
-    close_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-    close_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
-
-    bars_to_resolution: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    max_favorable_excursion: Mapped[Decimal] = mapped_column(
-        Numeric(18, 8), nullable=False, default=Decimal("0")
-    )
-    max_adverse_excursion: Mapped[Decimal] = mapped_column(
-        Numeric(18, 8), nullable=False, default=Decimal("0")
-    )
-
-    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
-
-
-class StrategyMetricsModel(Base):
+class StrategyMetric(Base):
     __tablename__ = "strategy_metrics"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    metric_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    metric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metric_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    total_cases: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_hits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_fails: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_timeouts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    hit_rate: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("0"))
-    fail_rate: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("0"))
-    timeout_rate: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("0"))
+class StrategyCase(Base):
+    __tablename__ = "strategy_cases"
 
-    avg_bars_to_resolution: Mapped[Decimal] = mapped_column(
-        Numeric(18, 8), nullable=False, default=Decimal("0")
-    )
-    avg_time_to_resolution_seconds: Mapped[Decimal] = mapped_column(
-        Numeric(18, 8), nullable=False, default=Decimal("0")
-    )
-    avg_mfe: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("0"))
-    avg_mae: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("0"))
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    case_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    timeframe: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    direction: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    entry_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    exit_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# Compatibilidade com nomes antigos usados noutros ficheiros
+CandleModel = Candle
+CandleCoverageModel = CandleCoverage
+StrategyRunModel = StrategyRun
+StrategyMetricModel = StrategyMetric
+StrategyCaseModel = StrategyCase
+
+
+__all__ = [
+    "Candle",
+    "CandleModel",
+    "CandleCoverage",
+    "CandleCoverageModel",
+    "StrategyRun",
+    "StrategyRunModel",
+    "StrategyMetric",
+    "StrategyMetricModel",
+    "StrategyCase",
+    "StrategyCaseModel",
+]
