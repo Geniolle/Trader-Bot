@@ -1,3 +1,8 @@
+# app/services/stage_tests_service.py
+# Endpoints relacionados:
+# - GET  /api/v1/stage-tests/options
+# - POST /api/v1/stage-tests/run
+
 from __future__ import annotations
 
 import os
@@ -10,6 +15,10 @@ from urllib.parse import unquote, urlparse
 
 from app.core.logging import get_logger
 from app.core.settings import get_settings
+from app.stage_tests.catalog import (
+    get_stage_test_strategy_keys,
+    list_stage_test_strategies,
+)
 
 logger = get_logger(__name__)
 
@@ -21,9 +30,12 @@ def utc_now_iso() -> str:
 def normalize_symbol(symbol: str) -> str:
     if symbol is None:
         return ""
+
     value = symbol.upper().strip()
+
     for ch in ["/", "-", "_", " "]:
         value = value.replace(ch, "")
+
     return value
 
 
@@ -54,6 +66,7 @@ def get_db_path() -> str:
     parsed = urlparse(database_url)
     if parsed.scheme == "sqlite":
         raw_path = unquote(parsed.path or "").strip()
+
         if raw_path.startswith("/"):
             raw_path = raw_path[1:]
 
@@ -72,6 +85,7 @@ def get_db_path() -> str:
 def connect_db() -> sqlite3.Connection:
     db_path = get_db_path()
     logger.info("[STAGE_TESTS] A abrir ligação SQLite: %s", db_path)
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
@@ -112,9 +126,16 @@ def list_stage_test_options(min_candles: int = 1) -> dict[str, Any]:
             }
         )
 
-    logger.info("[STAGE_TESTS] options carregadas | total=%s", len(items))
+    strategies = list_stage_test_strategies()
+
+    logger.info(
+        "[STAGE_TESTS] options carregadas | strategies=%s | symbol_timeframes=%s",
+        len(strategies),
+        len(items),
+    )
 
     return {
+        "strategies": strategies,
         "items": items,
         "refreshed_at": utc_now_iso(),
     }
@@ -151,6 +172,22 @@ def validate_symbol_timeframe(symbol: str, timeframe: str, min_candles: int = 1)
         raise ValueError(
             f"Não existem candles suficientes para {normalized} {timeframe}. "
             f"Encontrados: {total}, mínimo exigido: {min_candles}."
+        )
+
+
+def validate_strategy(strategy: str) -> None:
+    allowed_keys = set(get_stage_test_strategy_keys())
+
+    logger.info(
+        "[STAGE_TESTS] validate_strategy | strategy=%s | allowed=%s",
+        strategy,
+        sorted(allowed_keys),
+    )
+
+    if strategy not in allowed_keys:
+        raise ValueError(
+            f"Strategy inválida: {strategy}. "
+            f"Permitidas: {', '.join(sorted(allowed_keys))}"
         )
 
 
@@ -204,6 +241,8 @@ def run_stage_test(
         min_candles,
         extra_args,
     )
+
+    validate_strategy(strategy)
 
     validate_symbol_timeframe(
         symbol=symbol,
