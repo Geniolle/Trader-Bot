@@ -1,8 +1,13 @@
+import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.core.settings import get_settings
+from app.providers.factory import MarketDataProviderFactory
+from app.providers.twelvedata import ProviderQuotaExceededError
 from app.storage.database import SessionLocal
 from app.storage.repositories.candle_queries import CandleQueryRepository
 
@@ -31,6 +36,36 @@ def normalize_timeframe(value: str | None) -> str:
     return aliases.get(normalized, normalized)
 
 
+def normalize_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def timeframe_to_timedelta(timeframe: str) -> timedelta:
+    mapping = {
+        "1m": timedelta(minutes=1),
+        "3m": timedelta(minutes=3),
+        "5m": timedelta(minutes=5),
+        "15m": timedelta(minutes=15),
+        "30m": timedelta(minutes=30),
+        "45m": timedelta(minutes=45),
+        "1h": timedelta(hours=1),
+        "2h": timedelta(hours=2),
+        "4h": timedelta(hours=4),
+        "1d": timedelta(days=1),
+        "1w": timedelta(weeks=1),
+    }
+
+    if timeframe in mapping:
+        return mapping[timeframe]
+
+    if timeframe == "1mo":
+        return timedelta(days=30)
+
+    return timedelta(minutes=5)
+
+
 def timeframe_to_window(timeframe: str) -> timedelta:
     mapping = {
         "1m": timedelta(hours=24),
@@ -45,11 +80,49 @@ def timeframe_to_window(timeframe: str) -> timedelta:
     return mapping.get(timeframe, timedelta(days=7))
 
 
-def build_initial_candles_payload(
-    symbol: str,
-    timeframe: str,
-) -> list[dict]:
-    now = datetime.utcnow()
+def floor_time_to_bucket(value: datetime, timeframe: str) -> datetime:
+    current = normalize_datetime(value)
+
+    if timeframe == "1m":
+        return current.replace(second=0, microsecond=0)
+
+    if timeframe in {"3m", "5m", "15m", "30m"}:
+        minutes = {"3m": 3, "5m": 5, "15m": 15, "30m": 30}[timeframe]
+        floored_minute = (current.minute // minutes) * minutes
+        return current.replace(minute=floored_minute, second=0, microsecond=0)
+
+    if timeframe == "1h":
+        return current.replace(minute=0, second=0, microsecond=0)
+
+    if timeframe == "4h":
+        floored_hour = (current.hour // 4) * 4
+        return current.replace(hour=floored_hour, minute=0, second=0, microsecond=0)
+
+    if timeframe == "1d":
+        return current.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    return current.replace(second=0, microsecond=0)
+
+
+def serialize_candle_row(row) -> dict:
+    return {
+        "id": row.id,
+        "asset_id": row.asset_id,
+        "symbol": row.symbol,
+        "timeframe": row.timeframe,
+        "open_time": row.open_time.isoformat(),
+        "close_time": row.close_time.isoformat(),
+        "open": str(row.open),
+        "high": str(row.high),
+        "low": str(row.low),
+        "close": str(row.close),
+        "volume": str(row.volume),
+        "source": row.source,
+    }
+
+
+def load_initial_candles(symbol: str, timeframe: str) -> list[dict]:
+    now = normalize_datetime(datetime.utcnow())
     start_at = now - timeframe_to_window(timeframe)
 
     session = SessionLocal()
@@ -62,26 +135,130 @@ def build_initial_candles_payload(
             end_at=now,
             limit=5000,
         )
-
-        return [
-            {
-                "id": row.id,
-                "asset_id": row.asset_id,
-                "symbol": row.symbol,
-                "timeframe": row.timeframe,
-                "open_time": row.open_time.isoformat(),
-                "close_time": row.close_time.isoformat(),
-                "open": str(row.open),
-                "high": str(row.high),
-                "low": str(row.low),
-                "close": str(row.close),
-                "volume": str(row.volume),
-                "source": row.source,
-            }
-            for row in rows
-        ]
+        return [serialize_candle_row(row) for row in rows]
     finally:
         session.close()
+
+
+def load_last_closed_candle(symbol: str, timeframe: str):
+    now = normalize_datetime(datetime.utcnow())
+    start_at = now - timeframe_to_window(timeframe)
+
+    session = SessionLocal()
+    try:
+        rows = CandleQueryRepository().list_by_filters(
+            session=session,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_at=start_at,
+            end_at=now,
+            limit=1,
+        )
+        if not rows:
+            return None
+        return rows[-1]
+    finally:
+        session.close()
+
+
+def build_tick_from_last_closed(symbol: str, timeframe: str) -> dict | None:
+    row = load_last_closed_candle(symbol, timeframe)
+    if row is None:
+        return None
+
+    return {
+        "symbol": row.symbol,
+        "timeframe": row.timeframe,
+        "open_time": row.open_time.isoformat(),
+        "open": float(row.open),
+        "high": float(row.high),
+        "low": float(row.low),
+        "close": float(row.close),
+        "count": 1,
+        "source": row.source,
+        "provider": row.source,
+        "market_session": None,
+        "timezone": "UTC",
+        "is_delayed": True,
+        "is_mock": True,
+    }
+
+
+def try_build_live_tick(symbol: str, timeframe: str) -> dict | None:
+    settings = get_settings()
+    provider = MarketDataProviderFactory().get_provider(settings.market_data_provider)
+
+    now = normalize_datetime(datetime.utcnow())
+    candle_delta = timeframe_to_timedelta(timeframe)
+    bucket_open = floor_time_to_bucket(now, timeframe)
+    request_start = bucket_open - candle_delta
+    request_end = now
+
+    candles = provider.get_historical_candles(
+        symbol=symbol,
+        timeframe=timeframe,
+        start_at=request_start,
+        end_at=request_end,
+    )
+
+    if not candles:
+        return None
+
+    latest = candles[-1]
+    latest_open = normalize_datetime(latest.open_time)
+    current_bucket_open = floor_time_to_bucket(now, timeframe)
+
+    tick_open = latest_open if latest_open >= current_bucket_open else current_bucket_open
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "open_time": tick_open.isoformat(),
+        "open": float(latest.open),
+        "high": float(latest.high),
+        "low": float(latest.low),
+        "close": float(latest.close),
+        "count": 1,
+        "source": latest.source,
+        "provider": provider.provider_name(),
+        "market_session": None,
+        "timezone": "UTC",
+        "is_delayed": False,
+        "is_mock": False,
+    }
+
+
+async def emit_heartbeat(
+    websocket: WebSocket,
+    count: int,
+) -> None:
+    await websocket.send_json(
+        {
+            "event": "heartbeat",
+            "data": {
+                "count": count,
+                "message": "alive",
+            },
+        }
+    )
+
+
+async def emit_provider_error(
+    websocket: WebSocket,
+    message: str,
+    symbol: str,
+    timeframe: str,
+) -> None:
+    await websocket.send_json(
+        {
+            "event": "provider_error",
+            "data": {
+                "message": message,
+                "symbol": symbol,
+                "timeframe": timeframe,
+            },
+        }
+    )
 
 
 @router.websocket("/ws")
@@ -97,7 +274,112 @@ async def websocket_feed(websocket: WebSocket) -> None:
         }
     )
 
+    heartbeat_task: asyncio.Task | None = None
+    stream_task: asyncio.Task | None = None
+
+    async def run_heartbeat() -> None:
+        counter = 0
+        while True:
+            counter += 1
+            await emit_heartbeat(websocket, counter)
+            await asyncio.sleep(15)
+
+    async def run_stream(
+        symbol: str,
+        timeframe: str,
+        market_type: str | None,
+        catalog: str | None,
+    ) -> None:
+        last_tick_key = ""
+
+        initial_candles = load_initial_candles(symbol, timeframe)
+
+        await websocket.send_json(
+            {
+                "event": "subscribed",
+                "data": {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "market_type": market_type,
+                    "catalog": catalog,
+                },
+            }
+        )
+
+        await websocket.send_json(
+            {
+                "event": "initial_candles",
+                "data": {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "candles": initial_candles,
+                },
+            }
+        )
+
+        while True:
+            try:
+                tick = try_build_live_tick(symbol, timeframe)
+            except ProviderQuotaExceededError as exc:
+                fallback_tick = build_tick_from_last_closed(symbol, timeframe)
+
+                if fallback_tick:
+                    fallback_key = (
+                        f"{fallback_tick['symbol']}|"
+                        f"{fallback_tick['timeframe']}|"
+                        f"{fallback_tick['open_time']}|"
+                        f"{fallback_tick['close']}"
+                    )
+
+                    if fallback_key != last_tick_key:
+                        last_tick_key = fallback_key
+                        await websocket.send_json(
+                            {
+                                "event": "candle_tick",
+                                "data": fallback_tick,
+                            }
+                        )
+
+                await emit_provider_error(
+                    websocket=websocket,
+                    message=str(exc),
+                    symbol=symbol,
+                    timeframe=timeframe,
+                )
+                await asyncio.sleep(20)
+                continue
+            except Exception as exc:
+                await emit_provider_error(
+                    websocket=websocket,
+                    message=f"Falha no stream realtime: {exc}",
+                    symbol=symbol,
+                    timeframe=timeframe,
+                )
+                await asyncio.sleep(10)
+                continue
+
+            if tick:
+                tick_key = (
+                    f"{tick['symbol']}|"
+                    f"{tick['timeframe']}|"
+                    f"{tick['open_time']}|"
+                    f"{tick['close']}"
+                )
+
+                if tick_key != last_tick_key:
+                    last_tick_key = tick_key
+                    await websocket.send_json(
+                        {
+                            "event": "candle_tick",
+                            "data": tick,
+                        }
+                    )
+
+            await asyncio.sleep(5)
+
     try:
+        heartbeat_task = asyncio.create_task(run_heartbeat())
+
         while True:
             raw_message = await websocket.receive_text()
 
@@ -140,6 +422,8 @@ async def websocket_feed(websocket: WebSocket) -> None:
 
             symbol = normalize_symbol(payload.get("symbol"))
             timeframe = normalize_timeframe(payload.get("timeframe"))
+            market_type = payload.get("market_type")
+            catalog = payload.get("catalog")
 
             if not symbol or not timeframe:
                 await websocket.send_json(
@@ -154,33 +438,26 @@ async def websocket_feed(websocket: WebSocket) -> None:
                 )
                 continue
 
-            await websocket.send_json(
-                {
-                    "event": "subscribed",
-                    "data": {
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "market_type": payload.get("market_type"),
-                        "catalog": payload.get("catalog"),
-                    },
-                }
-            )
+            if stream_task:
+                stream_task.cancel()
+                try:
+                    await stream_task
+                except asyncio.CancelledError:
+                    pass
 
-            candles = build_initial_candles_payload(
-                symbol=symbol,
-                timeframe=timeframe,
-            )
-
-            await websocket.send_json(
-                {
-                    "event": "initial_candles",
-                    "data": {
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "candles": candles,
-                    },
-                }
+            stream_task = asyncio.create_task(
+                run_stream(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    market_type=market_type if isinstance(market_type, str) else None,
+                    catalog=catalog if isinstance(catalog, str) else None,
+                )
             )
 
     except WebSocketDisconnect:
         return
+    finally:
+        if heartbeat_task:
+            heartbeat_task.cancel()
+        if stream_task:
+            stream_task.cancel()
