@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from sqlalchemy import DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
@@ -92,12 +91,17 @@ class StrategyCase(Base):
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
-# Compatibilidade com nomes antigos usados noutros ficheiros
+# Aliases de compatibilidade
 CandleModel = Candle
 CandleCoverageModel = CandleCoverage
+
 StrategyRunModel = StrategyRun
+
 StrategyMetricModel = StrategyMetric
+StrategyMetricsModel = StrategyMetric
+
 StrategyCaseModel = StrategyCase
+StrategyCasesModel = StrategyCase
 
 
 __all__ = [
@@ -109,6 +113,8 @@ __all__ = [
     "StrategyRunModel",
     "StrategyMetric",
     "StrategyMetricModel",
+    "StrategyMetricsModel",
     "StrategyCase",
     "StrategyCaseModel",
+    "StrategyCasesModel",
 ]
