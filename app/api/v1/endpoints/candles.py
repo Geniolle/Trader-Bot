@@ -24,10 +24,20 @@ def list_candles(
     normalized_symbol = symbol.strip().upper()
     normalized_timeframe = timeframe.strip().lower()
 
+    print("###################################################################################")
+    print("[CANDLES] INICIO")
+    print(f"[CANDLES] SYMBOL={normalized_symbol}")
+    print(f"[CANDLES] TIMEFRAME={normalized_timeframe}")
+    print(f"[CANDLES] START_AT={start_at}")
+    print(f"[CANDLES] END_AT={end_at}")
+    print(f"[CANDLES] LIMIT={limit}")
+    print(f"[CANDLES] SYNC={sync}")
+
     session = SessionLocal()
     try:
         try:
             if sync:
+                print("[CANDLES] A chamar CandleCacheSyncService.ensure_range()")
                 CandleCacheSyncService().ensure_range(
                     session=session,
                     symbol=normalized_symbol,
@@ -35,7 +45,11 @@ def list_candles(
                     start_at=start_at,
                     end_at=end_at,
                 )
+                print("[CANDLES] ensure_range() concluído sem exceção")
         except ProviderQuotaExceededError as exc:
+            print("[CANDLES] ProviderQuotaExceededError capturada")
+            print(f"[CANDLES] ERRO_QUOTA={exc}")
+
             cached_rows = CandleQueryRepository().list_by_filters(
                 session=session,
                 symbol=normalized_symbol,
@@ -45,7 +59,10 @@ def list_candles(
                 limit=limit,
             )
 
+            print(f"[CANDLES] CACHE_ROWS={len(cached_rows)}")
+
             if cached_rows:
+                print("[CANDLES] A devolver cache local")
                 return [
                     CandleResponse(
                         id=row.id,
@@ -64,8 +81,10 @@ def list_candles(
                     for row in cached_rows
                 ]
 
+            print("[CANDLES] Sem cache local, a devolver HTTP 429")
             raise HTTPException(status_code=429, detail=str(exc)) from exc
 
+        print("[CANDLES] A consultar base local após sync")
         rows = CandleQueryRepository().list_by_filters(
             session=session,
             symbol=normalized_symbol,
@@ -74,6 +93,8 @@ def list_candles(
             end_at=end_at,
             limit=limit,
         )
+
+        print(f"[CANDLES] ROWS_FINAL={len(rows)}")
 
         return [
             CandleResponse(
@@ -93,4 +114,6 @@ def list_candles(
             for row in rows
         ]
     finally:
+        print("[CANDLES] FIM")
+        print("###################################################################################")
         session.close()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from app.core.settings import get_settings
 from app.providers.factory import MarketDataProviderFactory
@@ -34,8 +34,10 @@ class CandleCacheSyncService:
     ) -> dict:
         normalized_symbol = self._normalize_symbol(symbol)
         normalized_timeframe = self._normalize_timeframe(timeframe)
+        normalized_start_at = self._normalize_datetime(start_at)
+        normalized_end_at = self._normalize_datetime(end_at)
 
-        if start_at >= end_at:
+        if normalized_start_at >= normalized_end_at:
             return {
                 "synced": False,
                 "reason": "invalid_range",
@@ -60,8 +62,8 @@ class CandleCacheSyncService:
         ranges = self._build_sync_ranges(
             coverage=coverage,
             timeframe=normalized_timeframe,
-            start_at=start_at,
-            end_at=end_at,
+            start_at=normalized_start_at,
+            end_at=normalized_end_at,
         )
 
         if not ranges:
@@ -107,26 +109,8 @@ class CandleCacheSyncService:
                 "ranges_requested": len(ranges),
                 "candles_written": total_written,
             }
-        except Exception as exc:
+        except Exception:
             session.rollback()
-
-            has_local_rows = self._has_any_local_candles(
-                session=session,
-                symbol=normalized_symbol,
-                timeframe=normalized_timeframe,
-                start_at=start_at,
-                end_at=end_at,
-            )
-
-            if has_local_rows:
-                return {
-                    "synced": False,
-                    "reason": "provider_failed_using_local_cache",
-                    "ranges_requested": len(ranges),
-                    "candles_written": 0,
-                    "error": str(exc),
-                }
-
             raise
 
     def _build_sync_ranges(
@@ -136,38 +120,57 @@ class CandleCacheSyncService:
         start_at: datetime,
         end_at: datetime,
     ) -> list[SyncRange]:
-        if coverage is None or coverage.covered_from is None or coverage.covered_to is None:
-            return [SyncRange(start_at=start_at, end_at=end_at)]
+        normalized_start_at = self._normalize_datetime(start_at)
+        normalized_end_at = self._normalize_datetime(end_at)
+
+        if coverage is None:
+            return [
+                SyncRange(
+                    start_at=normalized_start_at,
+                    end_at=normalized_end_at,
+                )
+            ]
+
+        covered_from = self._normalize_datetime(coverage.covered_from)
+        covered_to = self._normalize_datetime(coverage.covered_to)
+
+        if covered_from is None or covered_to is None:
+            return [
+                SyncRange(
+                    start_at=normalized_start_at,
+                    end_at=normalized_end_at,
+                )
+            ]
 
         ranges: list[SyncRange] = []
 
-        if start_at < coverage.covered_from:
+        if normalized_start_at < covered_from:
             ranges.append(
                 SyncRange(
-                    start_at=start_at,
-                    end_at=min(end_at, coverage.covered_from),
+                    start_at=normalized_start_at,
+                    end_at=min(normalized_end_at, covered_from),
                 )
             )
 
-        if end_at > coverage.covered_to:
+        if normalized_end_at > covered_to:
             ranges.append(
                 SyncRange(
-                    start_at=max(start_at, coverage.covered_to),
-                    end_at=end_at,
+                    start_at=max(normalized_start_at, covered_to),
+                    end_at=normalized_end_at,
                 )
             )
 
         reconcile_bars = max(self.settings.candle_cache_reconcile_bars, 0)
-        if reconcile_bars > 0 and end_at >= coverage.covered_to:
+        if reconcile_bars > 0 and normalized_end_at >= covered_to:
             delta = self._timeframe_to_timedelta(timeframe)
             reconcile_start = max(
-                start_at,
-                coverage.covered_to - (delta * reconcile_bars),
+                normalized_start_at,
+                covered_to - (delta * reconcile_bars),
             )
             ranges.append(
                 SyncRange(
                     start_at=reconcile_start,
-                    end_at=end_at,
+                    end_at=normalized_end_at,
                 )
             )
 
@@ -209,13 +212,16 @@ class CandleCacheSyncService:
         start_at: datetime,
         end_at: datetime,
     ) -> bool:
+        normalized_start_at = self._normalize_datetime(start_at)
+        normalized_end_at = self._normalize_datetime(end_at)
+
         row = (
             session.query(CandleModel.id)
             .filter(
                 CandleModel.symbol == symbol,
                 CandleModel.timeframe == timeframe,
-                CandleModel.open_time >= start_at,
-                CandleModel.close_time <= end_at,
+                CandleModel.open_time >= normalized_start_at,
+                CandleModel.close_time <= normalized_end_at,
             )
             .first()
         )
@@ -263,3 +269,12 @@ class CandleCacheSyncService:
             return timedelta(days=30)
 
         return timedelta(minutes=1)
+
+    def _normalize_datetime(self, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+
+        if value.tzinfo is None:
+            return value
+
+        return value.astimezone(UTC).replace(tzinfo=None)
