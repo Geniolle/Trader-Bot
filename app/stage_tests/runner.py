@@ -7,18 +7,15 @@
 # - --timeframe
 # - --strategy
 #
-# Observação:
-# Esta versão:
-# 1. resolve a strategy visual para a strategy real;
-# 2. lê DB_PATH do ambiente ou faz fallback para settings.database_url;
-# 3. detecta dinamicamente as colunas existentes na tabela candles;
-# 4. percorre candles e aciona o motor real da strategy;
-# 5. cria StrategyRun compatível com o model atual.
+# Saída:
+# - logs humanos em stdout
+# - uma linha final STAGE_TEST_RESULT_JSON=<json> para a API extrair métricas
 
 from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import os
 import sqlite3
 import uuid
@@ -59,22 +56,17 @@ def get_db_path() -> str:
     if database_url.startswith("sqlite:///"):
         raw_path = database_url.replace("sqlite:///", "", 1)
         raw_path = unquote(raw_path).strip()
-
         if not raw_path:
             raise RuntimeError("database_url SQLite inválida.")
-
         return raw_path
 
     parsed = urlparse(database_url)
     if parsed.scheme == "sqlite":
         raw_path = unquote(parsed.path or "").strip()
-
         if raw_path.startswith("/"):
             raw_path = raw_path[1:]
-
         if not raw_path:
             raise RuntimeError("database_url SQLite inválida.")
-
         return raw_path
 
     raise RuntimeError(
@@ -374,6 +366,12 @@ def summarize_case_outcome(case: Any) -> str:
     return "other"
 
 
+def pct(part: int, total: int) -> float:
+    if total <= 0:
+        return 0.0
+    return round((part / total) * 100, 2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage Testes runner")
     parser.add_argument("--symbol", required=True)
@@ -546,6 +544,27 @@ def main() -> None:
     print(f"OTHERS                 : {other_count}")
     print("RESULTADO              : RUN EXECUTADO COM SUCESSO")
     print("============================================================")
+
+    metrics = {
+        "strategy_class": strategy_impl.__class__.__name__,
+        "runtime_strategy": runtime_strategy,
+        "total_candles": len(candles),
+        "warmup": int(warmup),
+        "triggers": trigger_count,
+        "open_cases_final": len(open_cases),
+        "closed_cases": len(closed_cases),
+        "hits": hit_count,
+        "fails": fail_count,
+        "timeouts": timeout_count,
+        "others": other_count,
+        "hit_rate": pct(hit_count, len(closed_cases)),
+        "fail_rate": pct(fail_count, len(closed_cases)),
+        "timeout_rate": pct(timeout_count, len(closed_cases)),
+        "first_candle": str(first_row["open_time"]),
+        "last_candle": str(last_row["open_time"]),
+    }
+
+    print(f"STAGE_TEST_RESULT_JSON={json.dumps(metrics, ensure_ascii=False)}")
 
 
 if __name__ == "__main__":

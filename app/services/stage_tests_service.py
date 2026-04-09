@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import sqlite3
@@ -224,6 +225,27 @@ def build_stage_test_command(
     return command
 
 
+def extract_metrics_from_stdout(stdout: str) -> dict[str, Any] | None:
+    marker = "STAGE_TEST_RESULT_JSON="
+
+    for line in reversed((stdout or "").splitlines()):
+        if not line.startswith(marker):
+            continue
+
+        payload = line[len(marker):].strip()
+        if not payload:
+            return None
+
+        try:
+            data = json.loads(payload)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            return None
+
+    return None
+
+
 def run_stage_test(
     symbol: str,
     timeframe: str,
@@ -265,10 +287,13 @@ def run_stage_test(
         errors="replace",
     )
 
+    metrics = extract_metrics_from_stdout(result.stdout or "")
+
     logger.info(
-        "[STAGE_TESTS] run concluído | return_code=%s | ok=%s",
+        "[STAGE_TESTS] run concluído | return_code=%s | ok=%s | metrics_present=%s",
         result.returncode,
         result.returncode == 0,
+        metrics is not None,
     )
 
     return {
@@ -280,4 +305,5 @@ def run_stage_test(
         "stdout": result.stdout or "",
         "stderr": result.stderr or "",
         "return_code": int(result.returncode),
+        "metrics": metrics,
     }

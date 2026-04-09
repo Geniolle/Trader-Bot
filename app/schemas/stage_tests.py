@@ -1,5 +1,5 @@
 # app/schemas/stage_tests.py
-# Endpoints relacionados:
+# Endpoints:
 # - GET  /api/v1/stage-tests/options
 # - POST /api/v1/stage-tests/run
 
@@ -36,6 +36,25 @@ class StageTestRunRequest(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
 
 
+class StageTestMetricsResponse(BaseModel):
+    strategy_class: str
+    runtime_strategy: str
+    total_candles: int
+    warmup: int
+    triggers: int
+    open_cases_final: int
+    closed_cases: int
+    hits: int
+    fails: int
+    timeouts: int
+    others: int
+    hit_rate: float
+    fail_rate: float
+    timeout_rate: float
+    first_candle: str | None = None
+    last_candle: str | None = None
+
+
 class StageTestRunResponse(BaseModel):
     ok: bool
     command: list[str]
@@ -45,3 +64,4 @@ class StageTestRunResponse(BaseModel):
     stdout: str
     stderr: str
     return_code: int
+    metrics: StageTestMetricsResponse | None = None
