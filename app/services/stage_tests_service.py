@@ -52,14 +52,14 @@ def get_db_path() -> str:
     logger.info("[STAGE_TESTS] database_url lida das settings: %s", database_url)
 
     if not database_url:
-        raise RuntimeError("database_url não configurada.")
+        raise RuntimeError("database_url nÃ£o configurada.")
 
     if database_url.startswith("sqlite:///"):
         raw_path = database_url.replace("sqlite:///", "", 1)
         raw_path = unquote(raw_path).strip()
 
         if not raw_path:
-            raise RuntimeError("database_url SQLite inválida.")
+            raise RuntimeError("database_url SQLite invÃ¡lida.")
 
         logger.info("[STAGE_TESTS] DB path derivado de database_url: %s", raw_path)
         return raw_path
@@ -72,7 +72,7 @@ def get_db_path() -> str:
             raw_path = raw_path[1:]
 
         if not raw_path:
-            raise RuntimeError("database_url SQLite inválida.")
+            raise RuntimeError("database_url SQLite invÃ¡lida.")
 
         logger.info("[STAGE_TESTS] DB path derivado via urlparse: %s", raw_path)
         return raw_path
@@ -85,7 +85,7 @@ def get_db_path() -> str:
 
 def connect_db() -> sqlite3.Connection:
     db_path = get_db_path()
-    logger.info("[STAGE_TESTS] A abrir ligação SQLite: %s", db_path)
+    logger.info("[STAGE_TESTS] A abrir ligaÃ§Ã£o SQLite: %s", db_path)
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -171,8 +171,8 @@ def validate_symbol_timeframe(symbol: str, timeframe: str, min_candles: int = 1)
 
     if total < min_candles:
         raise ValueError(
-            f"Não existem candles suficientes para {normalized} {timeframe}. "
-            f"Encontrados: {total}, mínimo exigido: {min_candles}."
+            f"NÃ£o existem candles suficientes para {normalized} {timeframe}. "
+            f"Encontrados: {total}, mÃ­nimo exigido: {min_candles}."
         )
 
 
@@ -187,7 +187,7 @@ def validate_strategy(strategy: str) -> None:
 
     if strategy not in allowed_keys:
         raise ValueError(
-            f"Strategy inválida: {strategy}. "
+            f"Strategy invÃ¡lida: {strategy}. "
             f"Permitidas: {', '.join(sorted(allowed_keys))}"
         )
 
@@ -198,11 +198,12 @@ def build_stage_test_command(
     strategy: str,
     extra_args: list[str],
 ) -> list[str]:
-    base_command = os.getenv("STAGE_TEST_RUN_COMMAND", "").strip()
+    settings = get_settings()
+    base_command = (settings.stage_test_run_command or "").strip()
 
     if not base_command:
         raise RuntimeError(
-            "STAGE_TEST_RUN_COMMAND não configurado. "
+            "STAGE_TEST_RUN_COMMAND nÃ£o configurado. "
             "Exemplo: python -m app.stage_tests.runner"
         )
 
@@ -290,7 +291,7 @@ def run_stage_test(
     metrics = extract_metrics_from_stdout(result.stdout or "")
 
     logger.info(
-        "[STAGE_TESTS] run concluído | return_code=%s | ok=%s | metrics_present=%s",
+        "[STAGE_TESTS] run concluÃ­do | return_code=%s | ok=%s | metrics_present=%s",
         result.returncode,
         result.returncode == 0,
         metrics is not None,

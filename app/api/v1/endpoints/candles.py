@@ -7,6 +7,10 @@ from app.schemas.run import CandleResponse
 from app.services.candle_cache_sync import CandleCacheSyncService
 from app.storage.database import SessionLocal
 from app.storage.repositories.candle_queries import CandleQueryRepository
+from app.core.logging import get_logger
+
+# Instancia o logger padrão do projeto
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/candles", tags=["candles"])
 
@@ -24,21 +28,16 @@ def list_candles(
     normalized_symbol = symbol.strip().upper()
     normalized_timeframe = timeframe.strip().lower()
 
-    print("###################################################################################")
-    print("[CANDLES] INICIO")
-    print(f"[CANDLES] SYMBOL={normalized_symbol}")
-    print(f"[CANDLES] TIMEFRAME={normalized_timeframe}")
-    print(f"[CANDLES] START_AT={start_at}")
-    print(f"[CANDLES] END_AT={end_at}")
-    print(f"[CANDLES] LIMIT={limit}")
-    print(f"[CANDLES] MODE={mode}")
-    print(f"[CANDLES] SYNC={sync}")
+    # O nosso logger vistoso para o Mercado!
+    logger.info("###################################################################################")
+    logger.info(f"📊 [MERCADO] A carregar gráfico -> Símbolo: {normalized_symbol} | TimeFrame: {normalized_timeframe}")
+    logger.info(f"[CANDLES] INÍCIO | START_AT={start_at} | END_AT={end_at} | LIMIT={limit} | MODE={mode} | SYNC={sync}")
 
     session = SessionLocal()
     try:
         try:
             if sync:
-                print("[CANDLES] A chamar CandleCacheSyncService.ensure_range()")
+                logger.info("[CANDLES] A chamar CandleCacheSyncService.ensure_range()")
                 CandleCacheSyncService().ensure_range(
                     session=session,
                     symbol=normalized_symbol,
@@ -49,10 +48,10 @@ def list_candles(
                     sync=sync,
                     mode=mode,
                 )
-                print("[CANDLES] ensure_range() concluído sem exceção")
+                logger.info("[CANDLES] ensure_range() concluído sem exceção")
         except ProviderQuotaExceededError as exc:
-            print("[CANDLES] ProviderQuotaExceededError capturada")
-            print(f"[CANDLES] ERRO_QUOTA={exc}")
+            logger.warning("[CANDLES] ProviderQuotaExceededError capturada")
+            logger.warning(f"[CANDLES] ERRO_QUOTA={exc}")
 
             cached_rows = CandleQueryRepository().list_by_filters(
                 session=session,
@@ -63,10 +62,10 @@ def list_candles(
                 limit=limit,
             )
 
-            print(f"[CANDLES] CACHE_ROWS={len(cached_rows)}")
+            logger.info(f"[CANDLES] CACHE_ROWS={len(cached_rows)}")
 
             if cached_rows:
-                print("[CANDLES] A devolver cache local")
+                logger.info("📊 [MERCADO] A devolver cache local devido a limite da API")
                 return [
                     CandleResponse(
                         id=row.id,
@@ -85,10 +84,10 @@ def list_candles(
                     for row in cached_rows
                 ]
 
-            print("[CANDLES] Sem cache local, a devolver HTTP 429")
+            logger.error("[CANDLES] Sem cache local, a devolver HTTP 429 (Limite API Excedido)")
             raise HTTPException(status_code=429, detail=str(exc)) from exc
 
-        print("[CANDLES] A consultar base local após sync")
+        logger.info("[CANDLES] A consultar base local após sync")
         rows = CandleQueryRepository().list_by_filters(
             session=session,
             symbol=normalized_symbol,
@@ -98,7 +97,7 @@ def list_candles(
             limit=limit,
         )
 
-        print(f"[CANDLES] ROWS_FINAL={len(rows)}")
+        logger.info(f"📊 [MERCADO] Gráfico carregado com sucesso: {len(rows)} velas encontradas.")
 
         return [
             CandleResponse(
@@ -118,6 +117,6 @@ def list_candles(
             for row in rows
         ]
     finally:
-        print("[CANDLES] FIM")
-        print("###################################################################################")
+        logger.info("[CANDLES] FIM")
+        logger.info("###################################################################################")
         session.close()

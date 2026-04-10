@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     twelvedata_base_url: str = Field(default="https://api.twelvedata.com")
 
     database_url: str = Field(default="sqlite:///./market_research_lab.db")
+    stage_test_run_command: str = Field(default="python -m app.stage_tests.runner")
 
     candle_cache_enabled: bool = Field(default=True)
     candle_cache_sync_on_read: bool = Field(default=True)
