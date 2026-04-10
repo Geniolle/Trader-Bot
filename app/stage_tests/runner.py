@@ -1,16 +1,3 @@
-# app/stage_tests/runner.py
-# Executado por:
-# - POST /api/v1/stage-tests/run
-#
-# Argumentos:
-# - --symbol
-# - --timeframe
-# - --strategy
-#
-# Saída:
-# - logs humanos em stdout
-# - uma linha final STAGE_TEST_RESULT_JSON=<json> para a API extrair métricas
-
 from __future__ import annotations
 
 import argparse
@@ -372,6 +359,288 @@ def pct(part: int, total: int) -> float:
     return round((part / total) * 100, 2)
 
 
+def to_jsonable(value: Any) -> Any:
+    if value is None:
+        return None
+
+    if isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, Decimal):
+        return str(value)
+
+    if isinstance(value, uuid.UUID):
+        return str(value)
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {str(key): to_jsonable(val) for key, val in value.items()}
+
+    if isinstance(value, (list, tuple, set)):
+        return [to_jsonable(item) for item in value]
+
+    if hasattr(value, "__dict__"):
+        raw = {}
+        for key, val in vars(value).items():
+            if key.startswith("_"):
+                continue
+            raw[key] = to_jsonable(val)
+        return raw
+
+    return str(value)
+
+
+def read_case_metadata(case: Any) -> dict[str, Any]:
+    metadata = safe_attr(case, "metadata")
+    if isinstance(metadata, dict):
+        return to_jsonable(metadata)
+
+    if hasattr(metadata, "__dict__"):
+        return to_jsonable(metadata)
+
+    return {}
+
+
+def read_analysis_snapshot_from_case(case: Any) -> dict[str, Any] | None:
+    metadata = read_case_metadata(case)
+
+    direct_snapshot = metadata.get("analysis_snapshot")
+    if isinstance(direct_snapshot, dict):
+        return direct_snapshot
+
+    for candidate_name in [
+        "analysis_snapshot",
+        "snapshot",
+        "technical_snapshot",
+    ]:
+        candidate = safe_attr(case, candidate_name)
+        candidate = to_jsonable(candidate)
+        if isinstance(candidate, dict):
+            return candidate
+
+    return None
+
+
+def normalize_direction(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    raw = str(value).strip().lower()
+    if not raw:
+        return None
+
+    mapping = {
+        "buy": "buy",
+        "long": "buy",
+        "compra": "buy",
+        "sell": "sell",
+        "short": "sell",
+        "venda": "sell",
+        "neutral": "neutral",
+        "neutro": "neutral",
+    }
+
+    return mapping.get(raw, raw)
+
+
+def build_rules_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    patterns = snapshot.get("patterns") or {}
+    bollinger = snapshot.get("bollinger") or {}
+
+    rules: list[dict[str, Any]] = []
+
+    if isinstance(bollinger, dict):
+        if "closed_below_lower_band" in bollinger:
+          rules.append({
+              "label": "Fecho abaixo da banda inferior",
+              "passed": bollinger.get("closed_below_lower_band"),
+              "value": "",
+          })
+        if "closed_above_upper_band" in bollinger:
+            rules.append({
+                "label": "Fecho acima da banda superior",
+                "passed": bollinger.get("closed_above_upper_band"),
+                "value": "",
+            })
+        if "reentered_inside_band_long" in bollinger:
+            rules.append({
+                "label": "Reentrada na banda (long)",
+                "passed": bollinger.get("reentered_inside_band_long"),
+                "value": "",
+            })
+        if "reentered_inside_band_short" in bollinger:
+            rules.append({
+                "label": "Reentrada na banda (short)",
+                "passed": bollinger.get("reentered_inside_band_short"),
+                "value": "",
+            })
+
+    if isinstance(patterns, dict):
+        label_map = {
+            "bb_reentry_long": "BB reentry long",
+            "bb_reentry_short": "BB reentry short",
+            "ema_trend_confirmed_long": "EMA trend confirmed long",
+            "ema_trend_confirmed_short": "EMA trend confirmed short",
+            "rsi_recovery_long": "RSI recovery long",
+            "rsi_recovery_short": "RSI recovery short",
+            "macd_confirmation_long": "MACD confirmation long",
+            "macd_confirmation_short": "MACD confirmation short",
+            "countertrend_long": "Countertrend long",
+            "countertrend_short": "Countertrend short",
+        }
+
+        for key, label in label_map.items():
+            if key in patterns:
+                rules.append(
+                    {
+                        "label": label,
+                        "passed": patterns.get(key),
+                        "value": "",
+                    }
+                )
+
+    return rules
+
+
+def build_indicators_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, str]]:
+    indicators: list[dict[str, str]] = []
+
+    def add(label: str, value: Any) -> None:
+        if value is None:
+            return
+        text = str(value).strip()
+        if text == "":
+            return
+        indicators.append({"label": label, "value": text})
+
+    trigger_context = snapshot.get("trigger_context") or {}
+    trend = snapshot.get("trend") or {}
+    bollinger = snapshot.get("bollinger") or {}
+    momentum = snapshot.get("momentum") or {}
+    volatility = snapshot.get("volatility") or {}
+    structure = snapshot.get("structure") or {}
+    trigger_candle = snapshot.get("trigger_candle") or {}
+
+    if isinstance(trigger_context, dict):
+        add("Preço de referência", trigger_context.get("reference_price"))
+        add("Sessão", trigger_context.get("session"))
+
+    if isinstance(trend, dict):
+        add("EMA 5", trend.get("ema_5"))
+        add("EMA 10", trend.get("ema_10"))
+        add("EMA 20", trend.get("ema_20"))
+        add("EMA 30", trend.get("ema_30"))
+        add("EMA 40", trend.get("ema_40"))
+        add("Alinhamento EMA", trend.get("ema_alignment"))
+        add("Preço vs EMA 20", trend.get("price_vs_ema_20"))
+        add("Preço vs EMA 40", trend.get("price_vs_ema_40"))
+
+    if isinstance(momentum, dict):
+        add("RSI 14", momentum.get("rsi_14"))
+        add("Zona RSI", momentum.get("rsi_zone"))
+        add("Inclinação RSI", momentum.get("rsi_slope"))
+        add("MACD", momentum.get("macd_line"))
+        add("Signal", momentum.get("macd_signal"))
+        add("Histograma", momentum.get("macd_histogram"))
+        add("Estado MACD", momentum.get("macd_state"))
+
+    if isinstance(volatility, dict):
+        add("ATR 14", volatility.get("atr_14"))
+        add("Regime ATR", volatility.get("atr_regime"))
+        add("Range candle", volatility.get("candle_range"))
+        add("Range vs ATR", volatility.get("candle_range_vs_atr"))
+
+    if isinstance(bollinger, dict):
+        add("Bollinger superior", bollinger.get("upper"))
+        add("Bollinger média", bollinger.get("middle"))
+        add("Bollinger inferior", bollinger.get("lower"))
+        add("Bandwidth", bollinger.get("bandwidth"))
+        add("Posição do close na banda", bollinger.get("close_position_in_band"))
+
+    if isinstance(structure, dict):
+        add("Estrutura de mercado", structure.get("market_structure"))
+        add("Local de entrada", structure.get("entry_location"))
+        add("Distância ao suporte", structure.get("distance_to_recent_support"))
+        add("Distância à resistência", structure.get("distance_to_recent_resistance"))
+        add("Distância à EMA 20", structure.get("distance_to_ema_20"))
+        add("Distância à EMA 40", structure.get("distance_to_ema_40"))
+
+    if isinstance(trigger_candle, dict):
+        add("Candle open", trigger_candle.get("open"))
+        add("Candle high", trigger_candle.get("high"))
+        add("Candle low", trigger_candle.get("low"))
+        add("Candle close", trigger_candle.get("close"))
+        add("Body size", trigger_candle.get("body_size"))
+        add("Upper wick", trigger_candle.get("upper_wick"))
+        add("Lower wick", trigger_candle.get("lower_wick"))
+        add("Body ratio", trigger_candle.get("body_ratio"))
+        add("Tipo de candle", trigger_candle.get("candle_type"))
+
+    return indicators
+
+
+def build_analysis_from_case(case: Any) -> dict[str, Any] | None:
+    snapshot = read_analysis_snapshot_from_case(case)
+    metadata = read_case_metadata(case)
+
+    if not snapshot and not metadata:
+        return None
+
+    trade_bias = normalize_direction(
+        metadata.get("trade_bias") or safe_attr(case, "side")
+    )
+
+    trigger_time = (
+        safe_attr(case, "trigger_time")
+        or safe_attr(case, "trigger_candle_time")
+        or metadata.get("trigger_time")
+    )
+
+    summary = None
+    if isinstance(snapshot, dict):
+        structure = snapshot.get("structure") or {}
+        if isinstance(structure, dict):
+            summary = structure.get("market_structure")
+
+    if not summary:
+        setup_type = metadata.get("setup_type")
+        close_reason = metadata.get("close_reason")
+        summary_parts = [value for value in [setup_type, close_reason] if value]
+        summary = " | ".join(summary_parts) if summary_parts else None
+
+    trigger_label = None
+    if isinstance(snapshot, dict):
+        structure = snapshot.get("structure") or {}
+        if isinstance(structure, dict):
+            trigger_label = structure.get("entry_location")
+
+    if not trigger_label:
+        trigger_label = metadata.get("setup_type")
+
+    return {
+        "summary": summary,
+        "direction": trade_bias,
+        "validated_at": trigger_time,
+        "trigger_label": trigger_label,
+        "indicators": build_indicators_from_snapshot(snapshot or {}),
+        "rules": build_rules_from_snapshot(snapshot or {}),
+        "snapshot": snapshot,
+    }
+
+
+def select_best_analysis_case(closed_cases: list[Any], open_cases: list[Any]) -> Any | None:
+    candidates = list(reversed(closed_cases)) + list(reversed(open_cases))
+
+    for case in candidates:
+        analysis = build_analysis_from_case(case)
+        if analysis:
+            return case
+
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage Testes runner")
     parser.add_argument("--symbol", required=True)
@@ -533,6 +802,9 @@ def main() -> None:
         else:
             other_count += 1
 
+    best_case = select_best_analysis_case(closed_cases, open_cases)
+    analysis = build_analysis_from_case(best_case) if best_case is not None else None
+
     print(f"PRIMEIRO               : {first_row['open_time']}")
     print(f"ÚLTIMO                 : {last_row['open_time']}")
     print(f"TRIGGERS               : {trigger_count}")
@@ -542,6 +814,7 @@ def main() -> None:
     print(f"FAILS                  : {fail_count}")
     print(f"TIMEOUTS               : {timeout_count}")
     print(f"OTHERS                 : {other_count}")
+    print(f"ANALYSIS_PRESENT       : {'SIM' if analysis else 'NAO'}")
     print("RESULTADO              : RUN EXECUTADO COM SUCESSO")
     print("============================================================")
 
@@ -562,6 +835,7 @@ def main() -> None:
         "timeout_rate": pct(timeout_count, len(closed_cases)),
         "first_candle": str(first_row["open_time"]),
         "last_candle": str(last_row["open_time"]),
+        "analysis": to_jsonable(analysis),
     }
 
     print(f"STAGE_TEST_RESULT_JSON={json.dumps(metrics, ensure_ascii=False)}")

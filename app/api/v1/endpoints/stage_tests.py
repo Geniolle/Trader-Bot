@@ -1,8 +1,3 @@
-# app/api/v1/endpoints/stage_tests.py
-# Endpoints:
-# - GET  /api/v1/stage-tests/options
-# - POST /api/v1/stage-tests/run
-
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.stage_tests import (

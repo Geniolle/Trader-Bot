@@ -1,9 +1,6 @@
-# app/schemas/stage_tests.py
-# Endpoints:
-# - GET  /api/v1/stage-tests/options
-# - POST /api/v1/stage-tests/run
-
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -37,22 +34,27 @@ class StageTestRunRequest(BaseModel):
 
 
 class StageTestMetricsResponse(BaseModel):
-    strategy_class: str
-    runtime_strategy: str
-    total_candles: int
-    warmup: int
-    triggers: int
-    open_cases_final: int
-    closed_cases: int
-    hits: int
-    fails: int
-    timeouts: int
-    others: int
-    hit_rate: float
-    fail_rate: float
-    timeout_rate: float
+    strategy_class: str | None = None
+    runtime_strategy: str | None = None
+    total_candles: int | None = None
+    warmup: int | None = None
+    triggers: int | None = None
+    open_cases_final: int | None = None
+    closed_cases: int | None = None
+    hits: int | None = None
+    fails: int | None = None
+    timeouts: int | None = None
+    others: int | None = None
+    hit_rate: float | None = None
+    fail_rate: float | None = None
+    timeout_rate: float | None = None
     first_candle: str | None = None
     last_candle: str | None = None
+    analysis: dict[str, Any] | None = None
+    technical_analysis: dict[str, Any] | None = None
+    validation_analysis: dict[str, Any] | None = None
+    analysis_snapshot: dict[str, Any] | None = None
+    cases: list[dict[str, Any]] | None = None
 
 
 class StageTestRunResponse(BaseModel):
@@ -64,4 +66,6 @@ class StageTestRunResponse(BaseModel):
     stdout: str
     stderr: str
     return_code: int
-    metrics: StageTestMetricsResponse | None = None
+    metrics: StageTestMetricsResponse | dict[str, Any] | None = None
+    analysis: dict[str, Any] | None = None
+    cases: list[dict[str, Any]] | None = None

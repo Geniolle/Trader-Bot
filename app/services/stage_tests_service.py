@@ -1,8 +1,3 @@
-# app/services/stage_tests_service.py
-# Endpoints relacionados:
-# - GET  /api/v1/stage-tests/options
-# - POST /api/v1/stage-tests/run
-
 from __future__ import annotations
 
 import json
@@ -52,14 +47,14 @@ def get_db_path() -> str:
     logger.info("[STAGE_TESTS] database_url lida das settings: %s", database_url)
 
     if not database_url:
-        raise RuntimeError("database_url nÃ£o configurada.")
+        raise RuntimeError("database_url não configurada.")
 
     if database_url.startswith("sqlite:///"):
         raw_path = database_url.replace("sqlite:///", "", 1)
         raw_path = unquote(raw_path).strip()
 
         if not raw_path:
-            raise RuntimeError("database_url SQLite invÃ¡lida.")
+            raise RuntimeError("database_url SQLite inválida.")
 
         logger.info("[STAGE_TESTS] DB path derivado de database_url: %s", raw_path)
         return raw_path
@@ -72,7 +67,7 @@ def get_db_path() -> str:
             raw_path = raw_path[1:]
 
         if not raw_path:
-            raise RuntimeError("database_url SQLite invÃ¡lida.")
+            raise RuntimeError("database_url SQLite inválida.")
 
         logger.info("[STAGE_TESTS] DB path derivado via urlparse: %s", raw_path)
         return raw_path
@@ -85,7 +80,7 @@ def get_db_path() -> str:
 
 def connect_db() -> sqlite3.Connection:
     db_path = get_db_path()
-    logger.info("[STAGE_TESTS] A abrir ligaÃ§Ã£o SQLite: %s", db_path)
+    logger.info("[STAGE_TESTS] A abrir ligação SQLite: %s", db_path)
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -247,6 +242,75 @@ def extract_metrics_from_stdout(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+def extract_analysis_from_metrics(metrics: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(metrics, dict):
+        return None
+
+    direct_candidates = [
+        metrics.get("analysis"),
+        metrics.get("technical_analysis"),
+        metrics.get("validation_analysis"),
+    ]
+
+    for candidate in direct_candidates:
+        if isinstance(candidate, dict):
+            return candidate
+
+    snapshot = metrics.get("analysis_snapshot")
+    if isinstance(snapshot, dict):
+        return {
+            "summary": metrics.get("summary"),
+            "direction": metrics.get("direction") or metrics.get("side"),
+            "validated_at": metrics.get("validated_at") or metrics.get("validation_time"),
+            "trigger_label": metrics.get("trigger_label") or metrics.get("trigger"),
+            "snapshot": snapshot,
+        }
+
+    return None
+
+
+def extract_cases_from_metrics(metrics: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    if not isinstance(metrics, dict):
+        return None
+
+    raw_cases = metrics.get("cases")
+    if not isinstance(raw_cases, list):
+        return None
+
+    normalized_cases: list[dict[str, Any]] = []
+
+    for item in raw_cases:
+        if not isinstance(item, dict):
+            continue
+
+        normalized_case = {
+            "id": item.get("id"),
+            "case_number": item.get("case_number"),
+            "side": item.get("side"),
+            "status": item.get("status"),
+            "outcome": item.get("outcome"),
+            "trigger_price": item.get("trigger_price"),
+            "entry_price": item.get("entry_price"),
+            "close_price": item.get("close_price"),
+            "target_price": item.get("target_price"),
+            "invalidation_price": item.get("invalidation_price"),
+            "trigger_time": item.get("trigger_time"),
+            "trigger_candle_time": item.get("trigger_candle_time"),
+            "entry_time": item.get("entry_time"),
+            "close_time": item.get("close_time"),
+            "bars_to_resolution": item.get("bars_to_resolution"),
+            "max_favorable_excursion": item.get("max_favorable_excursion"),
+            "max_adverse_excursion": item.get("max_adverse_excursion"),
+            "close_reason": item.get("close_reason"),
+            "analysis": item.get("analysis") if isinstance(item.get("analysis"), dict) else None,
+            "metadata": item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
+        }
+
+        normalized_cases.append(normalized_case)
+
+    return normalized_cases
+
+
 def run_stage_test(
     symbol: str,
     timeframe: str,
@@ -289,12 +353,16 @@ def run_stage_test(
     )
 
     metrics = extract_metrics_from_stdout(result.stdout or "")
+    analysis = extract_analysis_from_metrics(metrics)
+    cases = extract_cases_from_metrics(metrics)
 
     logger.info(
-        "[STAGE_TESTS] run concluído | return_code=%s | ok=%s | metrics_present=%s",
+        "[STAGE_TESTS] run concluído | return_code=%s | ok=%s | metrics_present=%s | analysis_present=%s | cases_present=%s",
         result.returncode,
         result.returncode == 0,
         metrics is not None,
+        analysis is not None,
+        cases is not None,
     )
 
     return {
@@ -307,4 +375,6 @@ def run_stage_test(
         "stderr": result.stderr or "",
         "return_code": int(result.returncode),
         "metrics": metrics,
+        "analysis": analysis,
+        "cases": cases,
     }
