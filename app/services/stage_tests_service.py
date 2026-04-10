@@ -171,8 +171,8 @@ def validate_symbol_timeframe(symbol: str, timeframe: str, min_candles: int = 1)
 
     if total < min_candles:
         raise ValueError(
-            f"NÃ£o existem candles suficientes para {normalized} {timeframe}. "
-            f"Encontrados: {total}, mÃ­nimo exigido: {min_candles}."
+            f"Não existem candles suficientes para {normalized} {timeframe}. "
+            f"Encontrados: {total}, mínimo exigido: {min_candles}."
         )
 
 
@@ -187,7 +187,7 @@ def validate_strategy(strategy: str) -> None:
 
     if strategy not in allowed_keys:
         raise ValueError(
-            f"Strategy invÃ¡lida: {strategy}. "
+            f"Strategy inválida: {strategy}. "
             f"Permitidas: {', '.join(sorted(allowed_keys))}"
         )
 
@@ -203,7 +203,7 @@ def build_stage_test_command(
 
     if not base_command:
         raise RuntimeError(
-            "STAGE_TEST_RUN_COMMAND nÃ£o configurado. "
+            "STAGE_TEST_RUN_COMMAND não configurado. "
             "Exemplo: python -m app.stage_tests.runner"
         )
 
@@ -291,7 +291,7 @@ def run_stage_test(
     metrics = extract_metrics_from_stdout(result.stdout or "")
 
     logger.info(
-        "[STAGE_TESTS] run concluÃ­do | return_code=%s | ok=%s | metrics_present=%s",
+        "[STAGE_TESTS] run concluído | return_code=%s | ok=%s | metrics_present=%s",
         result.returncode,
         result.returncode == 0,
         metrics is not None,
