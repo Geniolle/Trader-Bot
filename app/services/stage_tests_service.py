@@ -279,13 +279,16 @@ def extract_cases_from_metrics(metrics: dict[str, Any] | None) -> list[dict[str,
 
     normalized_cases: list[dict[str, Any]] = []
 
-    for item in raw_cases:
+    for index, item in enumerate(raw_cases):
         if not isinstance(item, dict):
             continue
 
+        case_id = item.get("id") or item.get("case_id") or f"case-{index + 1}"
+        case_number = item.get("case_number") or index + 1
+
         normalized_case = {
-            "id": item.get("id"),
-            "case_number": item.get("case_number"),
+            "id": case_id,
+            "case_number": case_number,
             "side": item.get("side"),
             "status": item.get("status"),
             "outcome": item.get("outcome"),

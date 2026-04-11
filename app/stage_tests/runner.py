@@ -453,29 +453,37 @@ def build_rules_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
 
     if isinstance(bollinger, dict):
         if "closed_below_lower_band" in bollinger:
-          rules.append({
-              "label": "Fecho abaixo da banda inferior",
-              "passed": bollinger.get("closed_below_lower_band"),
-              "value": "",
-          })
+            rules.append(
+                {
+                    "label": "Fecho abaixo da banda inferior",
+                    "passed": bollinger.get("closed_below_lower_band"),
+                    "value": "",
+                }
+            )
         if "closed_above_upper_band" in bollinger:
-            rules.append({
-                "label": "Fecho acima da banda superior",
-                "passed": bollinger.get("closed_above_upper_band"),
-                "value": "",
-            })
+            rules.append(
+                {
+                    "label": "Fecho acima da banda superior",
+                    "passed": bollinger.get("closed_above_upper_band"),
+                    "value": "",
+                }
+            )
         if "reentered_inside_band_long" in bollinger:
-            rules.append({
-                "label": "Reentrada na banda (long)",
-                "passed": bollinger.get("reentered_inside_band_long"),
-                "value": "",
-            })
+            rules.append(
+                {
+                    "label": "Reentrada na banda (long)",
+                    "passed": bollinger.get("reentered_inside_band_long"),
+                    "value": "",
+                }
+            )
         if "reentered_inside_band_short" in bollinger:
-            rules.append({
-                "label": "Reentrada na banda (short)",
-                "passed": bollinger.get("reentered_inside_band_short"),
-                "value": "",
-            })
+            rules.append(
+                {
+                    "label": "Reentrada na banda (short)",
+                    "passed": bollinger.get("reentered_inside_band_short"),
+                    "value": "",
+                }
+            )
 
     if isinstance(patterns, dict):
         label_map = {
@@ -627,6 +635,45 @@ def build_analysis_from_case(case: Any) -> dict[str, Any] | None:
         "indicators": build_indicators_from_snapshot(snapshot or {}),
         "rules": build_rules_from_snapshot(snapshot or {}),
         "snapshot": snapshot,
+    }
+
+
+def serialize_case(case: Any, case_number: int) -> dict[str, Any]:
+    metadata = read_case_metadata(case)
+    analysis = build_analysis_from_case(case)
+
+    case_id = (
+        safe_attr(case, "id")
+        or safe_attr(case, "case_id")
+        or safe_attr(case, "uuid")
+        or f"case-{case_number}"
+    )
+
+    return {
+        "id": str(case_id),
+        "case_number": case_number,
+        "side": to_jsonable(safe_attr(case, "side")),
+        "status": to_jsonable(safe_attr(case, "status")),
+        "outcome": to_jsonable(safe_attr(case, "outcome")),
+        "trigger_price": to_jsonable(safe_attr(case, "trigger_price")),
+        "entry_price": to_jsonable(safe_attr(case, "entry_price")),
+        "close_price": to_jsonable(safe_attr(case, "close_price")),
+        "target_price": to_jsonable(safe_attr(case, "target_price")),
+        "invalidation_price": to_jsonable(safe_attr(case, "invalidation_price")),
+        "trigger_time": to_jsonable(safe_attr(case, "trigger_time")),
+        "trigger_candle_time": to_jsonable(safe_attr(case, "trigger_candle_time")),
+        "entry_time": to_jsonable(safe_attr(case, "entry_time")),
+        "close_time": to_jsonable(safe_attr(case, "close_time")),
+        "bars_to_resolution": to_jsonable(safe_attr(case, "bars_to_resolution")),
+        "max_favorable_excursion": to_jsonable(
+            safe_attr(case, "max_favorable_excursion")
+        ),
+        "max_adverse_excursion": to_jsonable(
+            safe_attr(case, "max_adverse_excursion")
+        ),
+        "close_reason": to_jsonable(safe_attr(case, "close_reason")),
+        "analysis": to_jsonable(analysis),
+        "metadata": to_jsonable(metadata),
     }
 
 
@@ -805,6 +852,11 @@ def main() -> None:
     best_case = select_best_analysis_case(closed_cases, open_cases)
     analysis = build_analysis_from_case(best_case) if best_case is not None else None
 
+    serialized_cases = [
+        serialize_case(case, case_number=index + 1)
+        for index, case in enumerate(closed_cases)
+    ]
+
     print(f"PRIMEIRO               : {first_row['open_time']}")
     print(f"ÚLTIMO                 : {last_row['open_time']}")
     print(f"TRIGGERS               : {trigger_count}")
@@ -815,6 +867,7 @@ def main() -> None:
     print(f"TIMEOUTS               : {timeout_count}")
     print(f"OTHERS                 : {other_count}")
     print(f"ANALYSIS_PRESENT       : {'SIM' if analysis else 'NAO'}")
+    print(f"CASES_SERIALIZED       : {len(serialized_cases)}")
     print("RESULTADO              : RUN EXECUTADO COM SUCESSO")
     print("============================================================")
 
@@ -836,6 +889,7 @@ def main() -> None:
         "first_candle": str(first_row["open_time"]),
         "last_candle": str(last_row["open_time"]),
         "analysis": to_jsonable(analysis),
+        "cases": to_jsonable(serialized_cases),
     }
 
     print(f"STAGE_TEST_RESULT_JSON={json.dumps(metrics, ensure_ascii=False)}")
