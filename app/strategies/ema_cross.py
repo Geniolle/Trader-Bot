@@ -1,4 +1,6 @@
-# app/strategies/ema_cross.py
+# C:\Trader-bot\app\strategies\ema_cross.py
+
+from __future__ import annotations
 
 from decimal import Decimal
 
@@ -14,15 +16,19 @@ from app.strategies.base import BaseStrategy
 from app.strategies.decisions import CaseCloseDecision, TriggerDecision
 
 
+DECIMAL_ZERO = Decimal("0")
+DECIMAL_ONE = Decimal("1")
+DECIMAL_HUNDRED = Decimal("100")
+
+
 class EmaCrossStrategy(BaseStrategy):
     definition = StrategyDefinition(
         key="ema_cross",
         name="EMA Cross",
-        version="1.2.0",
+        version="2.0.0",
         description=(
-            "Detects EMA crossovers in both directions. "
-            "Creates long cases on bullish cross and short cases on bearish cross, "
-            "using percentage target and invalidation."
+            "Detecta cruzamentos entre EMA curta e longa, mas só abre a operação "
+            "no candle seguinte quando houver confirmação do rompimento/continuidade."
         ),
         category=StrategyCategory.TREND_FOLLOWING,
     )
@@ -30,7 +36,8 @@ class EmaCrossStrategy(BaseStrategy):
     def warmup_period(self, config: StrategyConfig) -> int:
         short_period = int(config.parameters.get("ema_short_period", 9))
         long_period = int(config.parameters.get("ema_long_period", 21))
-        return max(short_period, long_period, 40, 35)
+        ema_200_period = int(config.parameters.get("ema_trend_period", 200))
+        return max(short_period, long_period, ema_200_period, 220)
 
     def calculate_indicators(
         self,
@@ -50,6 +57,21 @@ class EmaCrossStrategy(BaseStrategy):
             "long_ema": long_ema,
         }
 
+    def _compute_ema_pair(
+        self,
+        candles: list[Candle],
+        short_period: int,
+        long_period: int,
+    ) -> tuple[Decimal | None, Decimal | None]:
+        if not candles:
+            return (None, None)
+
+        closes = [candle.close for candle in candles]
+        short_ema = exponential_moving_average(closes, short_period)
+        long_ema = exponential_moving_average(closes, long_period)
+
+        return (short_ema, long_ema)
+
     def _build_cross_context(
         self,
         candles: list[Candle],
@@ -59,16 +81,19 @@ class EmaCrossStrategy(BaseStrategy):
         if index < 1:
             return None
 
-        previous_slice = candles[:index]
-        current_slice = candles[: index + 1]
+        short_period = int(config.parameters.get("ema_short_period", 9))
+        long_period = int(config.parameters.get("ema_long_period", 21))
 
-        previous_indicators = self.calculate_indicators(previous_slice, config)
-        current_indicators = self.calculate_indicators(current_slice, config)
-
-        previous_short = previous_indicators.get("short_ema")
-        previous_long = previous_indicators.get("long_ema")
-        current_short = current_indicators.get("short_ema")
-        current_long = current_indicators.get("long_ema")
+        previous_short, previous_long = self._compute_ema_pair(
+            candles[:index],
+            short_period,
+            long_period,
+        )
+        current_short, current_long = self._compute_ema_pair(
+            candles[: index + 1],
+            short_period,
+            long_period,
+        )
 
         if (
             previous_short is None
@@ -85,35 +110,105 @@ class EmaCrossStrategy(BaseStrategy):
             direction = "long"
             reason = "ema_bullish_cross_confirmed"
             setup_type = "ema_bullish_cross"
+            cross_state = "bullish_cross"
         elif crossed_down:
             direction = "short"
             reason = "ema_bearish_cross_confirmed"
             setup_type = "ema_bearish_cross"
+            cross_state = "bearish_cross"
         else:
             return None
 
+        cross_candle = candles[index]
+
         return {
+            "cross_index": index,
             "direction": direction,
             "reason": reason,
             "setup_type": setup_type,
+            "cross_state": cross_state,
+            "cross_candle_open_time": cross_candle.open_time,
+            "cross_candle_close_time": cross_candle.close_time,
+            "cross_candle_open": cross_candle.open,
+            "cross_candle_high": cross_candle.high,
+            "cross_candle_low": cross_candle.low,
+            "cross_candle_close": cross_candle.close,
             "previous_short_ema": previous_short,
             "previous_long_ema": previous_long,
             "current_short_ema": current_short,
             "current_long_ema": current_long,
+            "short_ema_period": short_period,
+            "long_ema_period": long_period,
         }
 
-    def _resolve_trade_bias(
+    def _is_confirmation_candle_valid(
+        self,
+        confirmation_candle: Candle,
+        cross_context: dict[str, object],
+    ) -> bool:
+        direction = str(cross_context["direction"]).strip().lower()
+
+        cross_candle_high = Decimal(str(cross_context["cross_candle_high"]))
+        cross_candle_low = Decimal(str(cross_context["cross_candle_low"]))
+        cross_candle_close = Decimal(str(cross_context["cross_candle_close"]))
+        current_short_ema = Decimal(str(cross_context["current_short_ema"]))
+        current_long_ema = Decimal(str(cross_context["current_long_ema"]))
+
+        if direction == "long":
+            return (
+                confirmation_candle.close > confirmation_candle.open
+                and confirmation_candle.close > cross_candle_high
+                and confirmation_candle.close > cross_candle_close
+                and confirmation_candle.close > current_short_ema
+                and confirmation_candle.close > current_long_ema
+            )
+
+        return (
+            confirmation_candle.close < confirmation_candle.open
+            and confirmation_candle.close < cross_candle_low
+            and confirmation_candle.close < cross_candle_close
+            and confirmation_candle.close < current_short_ema
+            and confirmation_candle.close < current_long_ema
+        )
+
+    def _build_confirmation_context(
         self,
         candles: list[Candle],
         index: int,
         config: StrategyConfig,
-    ) -> dict:
-        context = self._build_cross_context(candles, index, config)
-        if context is None:
-            raise ValueError(
-                "EMA Cross tentou criar case sem cruzamento válido no candle informado."
-            )
-        return context
+    ) -> dict | None:
+        if index < 1:
+            return None
+
+        cross_index = index - 1
+        cross_context = self._build_cross_context(candles, cross_index, config)
+        if cross_context is None:
+            return None
+
+        confirmation_candle = candles[index]
+
+        if not self._is_confirmation_candle_valid(confirmation_candle, cross_context):
+            return None
+
+        direction = str(cross_context["direction"]).strip().lower()
+        setup_type = (
+            "ema_bullish_cross_next_candle"
+            if direction == "long"
+            else "ema_bearish_cross_next_candle"
+        )
+
+        return {
+            **cross_context,
+            "setup_type": setup_type,
+            "entry_mode": "confirm_next_candle",
+            "confirmation_index": index,
+            "confirmation_candle_open_time": confirmation_candle.open_time,
+            "confirmation_candle_close_time": confirmation_candle.close_time,
+            "confirmation_candle_open": confirmation_candle.open,
+            "confirmation_candle_high": confirmation_candle.high,
+            "confirmation_candle_low": confirmation_candle.low,
+            "confirmation_candle_close": confirmation_candle.close,
+        }
 
     def check_trigger(
         self,
@@ -124,27 +219,36 @@ class EmaCrossStrategy(BaseStrategy):
         if index < 1:
             return TriggerDecision(
                 triggered=False,
-                reason="not_enough_candles_for_cross",
+                reason="not_enough_candles_for_confirmation",
             )
 
-        cross_context = self._build_cross_context(candles, index, config)
-        if cross_context is None:
+        confirmation_context = self._build_confirmation_context(candles, index, config)
+        if confirmation_context is None:
             return TriggerDecision(
                 triggered=False,
-                reason="trigger_conditions_not_met",
+                reason="next_candle_confirmation_not_met",
             )
 
         return TriggerDecision(
             triggered=True,
-            reason=str(cross_context["reason"]),
+            reason="ema_cross_confirmed_by_next_candle",
             metadata={
-                "direction": str(cross_context["direction"]),
-                "trade_bias": str(cross_context["direction"]),
-                "setup_type": str(cross_context["setup_type"]),
-                "previous_short_ema": str(cross_context["previous_short_ema"]),
-                "previous_long_ema": str(cross_context["previous_long_ema"]),
-                "current_short_ema": str(cross_context["current_short_ema"]),
-                "current_long_ema": str(cross_context["current_long_ema"]),
+                "direction": str(confirmation_context["direction"]),
+                "trade_bias": str(confirmation_context["direction"]),
+                "setup_type": str(confirmation_context["setup_type"]),
+                "entry_mode": str(confirmation_context["entry_mode"]),
+                "cross_reason": str(confirmation_context["reason"]),
+                "cross_state": str(confirmation_context["cross_state"]),
+                "cross_index": str(confirmation_context["cross_index"]),
+                "cross_time": str(confirmation_context["cross_candle_close_time"]),
+                "confirmation_index": str(confirmation_context["confirmation_index"]),
+                "confirmation_time": str(
+                    confirmation_context["confirmation_candle_close_time"]
+                ),
+                "previous_short_ema": str(confirmation_context["previous_short_ema"]),
+                "previous_long_ema": str(confirmation_context["previous_long_ema"]),
+                "current_short_ema": str(confirmation_context["current_short_ema"]),
+                "current_long_ema": str(confirmation_context["current_long_ema"]),
             },
         )
 
@@ -155,27 +259,32 @@ class EmaCrossStrategy(BaseStrategy):
         config: StrategyConfig,
         run: StrategyRun,
     ) -> StrategyCase:
+        confirmation_context = self._build_confirmation_context(candles, index, config)
+        if confirmation_context is None:
+            raise ValueError(
+                "EMA Cross tentou criar case sem confirmação válida no próximo candle."
+            )
+
         current_candle = candles[index]
-        cross_context = self._resolve_trade_bias(candles, index, config)
+        trade_bias = str(confirmation_context["direction"]).strip().lower()
+        setup_type = str(confirmation_context["setup_type"])
+        entry_mode = str(confirmation_context["entry_mode"])
 
-        trade_bias = str(cross_context["direction"])
-        setup_type = str(cross_context["setup_type"])
-
-        target_percent = Decimal(str(config.parameters.get("target_percent", "2")))
-        stop_percent = Decimal(str(config.parameters.get("stop_percent", "1")))
-        timeout_bars = int(config.timeout_bars)
+        target_percent = Decimal(str(config.parameters.get("target_percent", "0.15")))
+        stop_percent = Decimal(str(config.parameters.get("stop_percent", "0.10")))
+        timeout_bars = int(config.parameters.get("timeout_bars", 12))
 
         entry_price = current_candle.close
 
         if trade_bias == "long":
-            target_price = entry_price * (Decimal("1") + (target_percent / Decimal("100")))
+            target_price = entry_price * (DECIMAL_ONE + (target_percent / DECIMAL_HUNDRED))
             invalidation_price = entry_price * (
-                Decimal("1") - (stop_percent / Decimal("100"))
+                DECIMAL_ONE - (stop_percent / DECIMAL_HUNDRED)
             )
         else:
-            target_price = entry_price * (Decimal("1") - (target_percent / Decimal("100")))
+            target_price = entry_price * (DECIMAL_ONE - (target_percent / DECIMAL_HUNDRED))
             invalidation_price = entry_price * (
-                Decimal("1") + (stop_percent / Decimal("100"))
+                DECIMAL_ONE + (stop_percent / DECIMAL_HUNDRED)
             )
 
         timeout_at = None
@@ -209,12 +318,21 @@ class EmaCrossStrategy(BaseStrategy):
                 "direction": trade_bias,
                 "side": trade_bias,
                 "setup_type": setup_type,
+                "entry_mode": entry_mode,
+                "cross_reason": str(confirmation_context["reason"]),
+                "cross_state": str(confirmation_context["cross_state"]),
+                "cross_index": str(confirmation_context["cross_index"]),
+                "cross_time": str(confirmation_context["cross_candle_close_time"]),
+                "confirmation_index": str(confirmation_context["confirmation_index"]),
+                "confirmation_time": str(
+                    confirmation_context["confirmation_candle_close_time"]
+                ),
                 "target_percent": str(target_percent),
                 "stop_percent": str(stop_percent),
-                "previous_short_ema": str(cross_context["previous_short_ema"]),
-                "previous_long_ema": str(cross_context["previous_long_ema"]),
-                "current_short_ema": str(cross_context["current_short_ema"]),
-                "current_long_ema": str(cross_context["current_long_ema"]),
+                "previous_short_ema": str(confirmation_context["previous_short_ema"]),
+                "previous_long_ema": str(confirmation_context["previous_long_ema"]),
+                "current_short_ema": str(confirmation_context["current_short_ema"]),
+                "current_long_ema": str(confirmation_context["current_long_ema"]),
                 "analysis_snapshot": snapshot,
             },
         )

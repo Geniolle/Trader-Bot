@@ -68,6 +68,30 @@ def normalize_entry_location(entry_location: str | None) -> str:
     if normalized in {"mid_range", "range", "meio_range", "meio-de-range"}:
         return "mid_range"
 
+    if normalized in {"range_edge", "borda_do_range"}:
+        return "range_edge"
+
+    return "unknown"
+
+
+def normalize_cross_state(cross_state: str | None) -> str:
+    normalized = str(cross_state or "").strip().lower()
+
+    if normalized in {"bullish_cross", "cross_up", "bull_cross"}:
+        return "bullish_cross"
+
+    if normalized in {"bearish_cross", "cross_down", "bear_cross"}:
+        return "bearish_cross"
+
+    if normalized in {"bullish_above", "above"}:
+        return "bullish_above"
+
+    if normalized in {"bearish_below", "below"}:
+        return "bearish_below"
+
+    if normalized in {"flat"}:
+        return "flat"
+
     return "unknown"
 
 
@@ -245,12 +269,7 @@ def has_meaningful_body(candle: Candle, minimum_ratio: Decimal = DECIMAL_POINT_5
 
 
 def is_small_star_body(candle: Candle) -> bool:
-    ratio = body_ratio(candle)
-    return ratio <= DECIMAL_POINT_35
-
-
-def has_small_force_body(candle: Candle) -> bool:
-    return body_ratio(candle) < DECIMAL_POINT_45
+    return body_ratio(candle) <= DECIMAL_POINT_35
 
 
 def strong_bearish_context(a: Candle, b: Candle | None = None) -> bool:
@@ -683,8 +702,13 @@ def build_force_reading(window: list[Candle], direction: str) -> dict[str, Any]:
 def build_macro_context(
     direction: str,
     trend_alignment: str,
-    price_vs_ema_20: str,
-    price_vs_ema_40: str,
+    price_vs_short_ema: str,
+    price_vs_long_ema: str,
+    price_vs_ema_200: str,
+    short_ema_slope: str,
+    long_ema_slope: str,
+    ema_200_slope: str,
+    cross_state: str,
     macd_state: str,
     market_structure: str,
     continuity_detected: bool,
@@ -696,42 +720,140 @@ def build_macro_context(
     macro_signals: list[str] = []
 
     normalized_entry_location = normalize_entry_location(entry_location)
+    normalized_cross_state = normalize_cross_state(cross_state)
 
     if direction == "buy":
+        if normalized_cross_state == "bullish_cross":
+            macro_points += 2
+            macro_signals.append("cruzamento_bullish_confirmado")
+        elif normalized_cross_state == "bullish_above":
+            macro_points += 1
+            macro_signals.append("curta_acima_longa")
+        elif normalized_cross_state == "bearish_cross":
+            macro_points -= 3
+            macro_signals.append("cruzamento_contra")
+
+        if short_ema_slope == "up":
+            macro_points += 1
+            macro_signals.append("m9_a_subir")
+        else:
+            macro_points -= 1
+            macro_signals.append("m9_sem_alinhamento")
+
+        if long_ema_slope == "up":
+            macro_points += 1
+            macro_signals.append("m21_a_subir")
+        else:
+            macro_points -= 1
+            macro_signals.append("m21_sem_alinhamento")
+
         if trend_alignment == "bullish":
             macro_points += 1
             macro_signals.append("alinhamento_ema_bullish")
-        if price_vs_ema_20 == "above":
+
+        if price_vs_short_ema == "above":
             macro_points += 1
-            macro_signals.append("preco_acima_ema20")
-        if price_vs_ema_40 == "above":
+            macro_signals.append("preco_acima_ema_curta")
+        else:
+            macro_points -= 1
+            macro_signals.append("preco_nao_acima_ema_curta")
+
+        if price_vs_long_ema == "above":
+            macro_points += 2
+            macro_signals.append("preco_acima_ema_longa")
+        else:
+            macro_points -= 2
+            macro_signals.append("preco_nao_acima_ema_longa")
+
+        if price_vs_ema_200 == "above":
             macro_points += 1
-            macro_signals.append("preco_acima_ema40")
+            macro_signals.append("preco_acima_ema200")
+        else:
+            macro_points -= 2
+            macro_signals.append("ema200_contra")
+
+        if ema_200_slope == "up":
+            macro_points += 1
+            macro_signals.append("ema200_a_subir")
+        elif ema_200_slope == "down":
+            macro_points -= 1
+            macro_signals.append("ema200_a_descer")
+
         if macd_state in {"bullish_cross", "bullish_above_signal"}:
             macro_points += 1
             macro_signals.append("macd_comprador")
+
         if market_structure == "bullish":
             macro_points += 1
             macro_signals.append("estrutura_bullish")
+
     else:
+        if normalized_cross_state == "bearish_cross":
+            macro_points += 2
+            macro_signals.append("cruzamento_bearish_confirmado")
+        elif normalized_cross_state == "bearish_below":
+            macro_points += 1
+            macro_signals.append("curta_abaixo_longa")
+        elif normalized_cross_state == "bullish_cross":
+            macro_points -= 3
+            macro_signals.append("cruzamento_contra")
+
+        if short_ema_slope == "down":
+            macro_points += 1
+            macro_signals.append("m9_a_descer")
+        else:
+            macro_points -= 1
+            macro_signals.append("m9_sem_alinhamento")
+
+        if long_ema_slope == "down":
+            macro_points += 1
+            macro_signals.append("m21_a_descer")
+        else:
+            macro_points -= 1
+            macro_signals.append("m21_sem_alinhamento")
+
         if trend_alignment == "bearish":
             macro_points += 1
             macro_signals.append("alinhamento_ema_bearish")
-        if price_vs_ema_20 == "below":
+
+        if price_vs_short_ema == "below":
             macro_points += 1
-            macro_signals.append("preco_abaixo_ema20")
-        if price_vs_ema_40 == "below":
+            macro_signals.append("preco_abaixo_ema_curta")
+        else:
+            macro_points -= 1
+            macro_signals.append("preco_nao_abaixo_ema_curta")
+
+        if price_vs_long_ema == "below":
+            macro_points += 2
+            macro_signals.append("preco_abaixo_ema_longa")
+        else:
+            macro_points -= 2
+            macro_signals.append("preco_nao_abaixo_ema_longa")
+
+        if price_vs_ema_200 == "below":
             macro_points += 1
-            macro_signals.append("preco_abaixo_ema40")
+            macro_signals.append("preco_abaixo_ema200")
+        else:
+            macro_points -= 2
+            macro_signals.append("ema200_contra")
+
+        if ema_200_slope == "down":
+            macro_points += 1
+            macro_signals.append("ema200_a_descer")
+        elif ema_200_slope == "up":
+            macro_points -= 1
+            macro_signals.append("ema200_a_subir")
+
         if macd_state in {"bearish_cross", "bearish_below_signal"}:
             macro_points += 1
             macro_signals.append("macd_vendedor")
+
         if market_structure == "bearish":
             macro_points += 1
             macro_signals.append("estrutura_bearish")
 
     if continuity_detected:
-        macro_points += 1
+        macro_points += 2
         macro_signals.append("continuidade_detectada")
 
     if impulsion_detected:
@@ -749,26 +871,87 @@ def build_macro_context(
         macro_signals.append("contexto_range_para_breakout")
 
     if normalized_entry_location == "breakout" and not has_sequence_support:
-        macro_points -= 2
+        macro_points -= 3
         macro_signals.append("breakout_sem_sequencia")
-
-    macro_is_strong = macro_points >= 4
-    macro_is_moderate = macro_points >= 3
 
     return {
         "macro_points": macro_points,
         "macro_signals": macro_signals,
-        "macro_is_strong": macro_is_strong,
-        "macro_is_moderate": macro_is_moderate,
+        "macro_is_strong": macro_points >= 8,
+        "macro_is_moderate": macro_points >= 6,
     }
+
+
+def count_severe_blockers(reasons_against: list[str]) -> int:
+    severe_tokens = {
+        "ema200_contra",
+        "adx_fraco",
+        "adx_sem_forca",
+        "macd_contra",
+        "trigger_sem_forca",
+        "trigger_contra_o_setup",
+        "sem_sequencia_confirmada",
+        "padrao_de_rejeicao",
+        "breakout_em_range",
+        "breakout_sem_sequencia",
+        "cruzamento_contra",
+    }
+    return sum(1 for token in reasons_against if token in severe_tokens)
+
+
+def derive_score_cap(
+    entry_location: str,
+    reasons_against: list[str],
+    hard_blockers: int,
+) -> int:
+    if not reasons_against:
+        return 10
+
+    severe_blockers = count_severe_blockers(reasons_against)
+    score_cap = 9
+
+    if "ema200_contra" in reasons_against:
+        score_cap = min(score_cap, 8)
+
+    if severe_blockers >= 1:
+        score_cap = min(score_cap, 8)
+
+    if hard_blockers >= 2 or severe_blockers >= 2:
+        score_cap = min(score_cap, 6 if entry_location == "breakout" else 7)
+
+    if hard_blockers >= 3 or severe_blockers >= 3:
+        score_cap = min(score_cap, 4 if entry_location == "breakout" else 5)
+
+    return score_cap
+
+
+def derive_decision_from_score(
+    final_score: int,
+    hard_blockers: int,
+) -> tuple[str, str, str]:
+    if final_score >= 8 and hard_blockers == 0:
+        return ("forte", "validar_entrada", "immediate")
+
+    if final_score >= 6 and hard_blockers <= 1:
+        return ("boa", "aceitar_com_confirmacao", "confirm_next_candle")
+
+    if final_score >= 4:
+        return ("neutra", "ter_cautela", "pullback_confirmation")
+
+    return ("fraca", "evitar_entrada", "reject")
 
 
 def score_confirmation(
     setup_direction: str,
     force_reading: dict[str, Any],
     trend_alignment: str,
-    price_vs_ema_20: str,
-    price_vs_ema_40: str,
+    price_vs_short_ema: str,
+    price_vs_long_ema: str,
+    price_vs_ema_200: str,
+    short_ema_slope: str,
+    long_ema_slope: str,
+    ema_200_slope: str,
+    cross_state: str,
     macd_state: str,
     rsi_slope: str,
     market_structure: str,
@@ -777,6 +960,7 @@ def score_confirmation(
 ) -> dict[str, Any]:
     direction = normalize_direction(setup_direction)
     normalized_entry_location = normalize_entry_location(entry_location)
+    normalized_cross_state = normalize_cross_state(cross_state)
 
     score = 0
     reasons_for: list[str] = []
@@ -789,6 +973,7 @@ def score_confirmation(
     trigger_body_ratio_raw = force_reading.get("trigger_candle", {}).get("body_ratio")
     trigger_body_ratio = Decimal(str(trigger_body_ratio_raw or "0"))
     active_patterns = force_reading.get("active_patterns", [])
+    dominant_pattern = str(force_reading.get("dominant_pattern") or "").strip()
     exhaustion_detected = bool(force_reading.get("exhaustion_detected"))
     impulsion_detected = bool(force_reading.get("impulsion_detected"))
     continuity_detected = bool(force_reading.get("continuity_detected"))
@@ -817,13 +1002,33 @@ def score_confirmation(
         "bearish_harami",
     }
 
+    hard_rejection_buy = {
+        "shooting_star",
+        "gravestone_doji",
+        "evening_star",
+        "bearish_engulfing",
+        "dark_cloud_cover",
+    }
+    hard_rejection_sell = {
+        "hammer",
+        "dragonfly_doji",
+        "morning_star",
+        "bullish_engulfing",
+        "piercing_line",
+    }
+
     has_sequence_support = continuity_detected or impulsion_detected or exhaustion_detected
 
     macro_context = build_macro_context(
         direction=direction,
         trend_alignment=trend_alignment,
-        price_vs_ema_20=price_vs_ema_20,
-        price_vs_ema_40=price_vs_ema_40,
+        price_vs_short_ema=price_vs_short_ema,
+        price_vs_long_ema=price_vs_long_ema,
+        price_vs_ema_200=price_vs_ema_200,
+        short_ema_slope=short_ema_slope,
+        long_ema_slope=long_ema_slope,
+        ema_200_slope=ema_200_slope,
+        cross_state=normalized_cross_state,
         macd_state=macd_state,
         market_structure=market_structure,
         continuity_detected=continuity_detected,
@@ -836,186 +1041,224 @@ def score_confirmation(
     macro_is_strong = bool(macro_context["macro_is_strong"])
     macro_is_moderate = bool(macro_context["macro_is_moderate"])
 
+    score += macro_points
+
+    negative_macro_signals = {
+        "cruzamento_contra",
+        "m9_sem_alinhamento",
+        "m21_sem_alinhamento",
+        "preco_nao_acima_ema_curta",
+        "preco_nao_acima_ema_longa",
+        "preco_nao_abaixo_ema_curta",
+        "preco_nao_abaixo_ema_longa",
+        "ema200_contra",
+        "contexto_range_para_breakout",
+        "breakout_sem_sequencia",
+    }
+
+    for macro_signal in macro_context["macro_signals"]:
+        if macro_signal in negative_macro_signals:
+            if macro_signal not in reasons_against:
+                reasons_against.append(macro_signal)
+        else:
+            if macro_signal not in reasons_for:
+                reasons_for.append(macro_signal)
+
     if direction == "buy":
-        if trend_alignment == "bullish":
-            score += 2
-            reasons_for.append("alinhamento_ema_bullish")
-        elif trend_alignment == "bearish":
-            score -= 2
-            reasons_against.append("alinhamento_ema_contra")
-
-        if price_vs_ema_20 == "above":
-            score += 2
-            reasons_for.append("preco_acima_ema20")
-        else:
-            score -= 1
-            reasons_against.append("preco_nao_acima_ema20")
-
-        if price_vs_ema_40 == "above":
-            score += 2
-            reasons_for.append("preco_acima_ema40")
-        else:
-            score -= 1
-            reasons_against.append("preco_nao_acima_ema40")
-
-        if macd_state in {"bullish_cross", "bullish_above_signal"}:
-            score += 2
-            reasons_for.append("macd_comprador")
+        if macd_state not in {"bullish_cross", "bullish_above_signal"}:
+            if macd_state in {"bearish_cross", "bearish_below_signal"}:
+                score -= 2
+                if "macd_contra" not in reasons_against:
+                    reasons_against.append("macd_contra")
 
         if rsi_slope == "up":
             score += 1
-            reasons_for.append("rsi_a_subir")
+            if "rsi_a_subir" not in reasons_for:
+                reasons_for.append("rsi_a_subir")
         elif rsi_slope == "down":
             score -= 1
-            reasons_against.append("rsi_a_descer")
-
-        if market_structure == "bullish":
-            score += 2
-            reasons_for.append("estrutura_bullish")
-        elif market_structure == "bearish":
-            score -= 2
-            reasons_against.append("estrutura_contra")
+            if "rsi_a_descer" not in reasons_against:
+                reasons_against.append("rsi_a_descer")
 
         if trigger_pattern in {"hammer", "bullish_impulse", "bullish_marubozu", "dragonfly_doji"}:
             score += 2
-            reasons_for.append(f"trigger_pattern={trigger_pattern}")
+            token = f"trigger_pattern={trigger_pattern}"
+            if token not in reasons_for:
+                reasons_for.append(token)
         elif trigger_strength_class in {"bearish_force", "bearish"}:
-            penalty = 4 if normalized_entry_location == "breakout" else 3 if trigger_strength_class == "bearish_force" else 2
+            penalty = 5 if normalized_entry_location == "breakout" else 4
             score -= penalty
-            reasons_against.append("trigger_contra_o_setup")
+            if "trigger_contra_o_setup" not in reasons_against:
+                reasons_against.append("trigger_contra_o_setup")
         elif trigger_body_ratio < DECIMAL_POINT_40:
-            penalty = 2 if normalized_entry_location == "breakout" else 1
+            penalty = 4 if normalized_entry_location == "breakout" else 3
             score -= penalty
-            reasons_against.append("trigger_sem_forca")
+            if "trigger_sem_forca" not in reasons_against:
+                reasons_against.append("trigger_sem_forca")
+
+        if dominant_pattern in hard_rejection_buy:
+            score -= 4
+            if "padrao_de_rejeicao" not in reasons_against:
+                reasons_against.append("padrao_de_rejeicao")
 
     else:
-        if trend_alignment == "bearish":
-            score += 2
-            reasons_for.append("alinhamento_ema_bearish")
-        elif trend_alignment == "bullish":
-            score -= 2
-            reasons_against.append("alinhamento_ema_contra")
-
-        if price_vs_ema_20 == "below":
-            score += 2
-            reasons_for.append("preco_abaixo_ema20")
-        else:
-            score -= 1
-            reasons_against.append("preco_nao_abaixo_ema20")
-
-        if price_vs_ema_40 == "below":
-            score += 2
-            reasons_for.append("preco_abaixo_ema40")
-        else:
-            score -= 1
-            reasons_against.append("preco_nao_abaixo_ema40")
-
-        if macd_state in {"bearish_cross", "bearish_below_signal"}:
-            score += 2
-            reasons_for.append("macd_vendedor")
+        if macd_state not in {"bearish_cross", "bearish_below_signal"}:
+            if macd_state in {"bullish_cross", "bullish_above_signal"}:
+                score -= 2
+                if "macd_contra" not in reasons_against:
+                    reasons_against.append("macd_contra")
 
         if rsi_slope == "down":
             score += 1
-            reasons_for.append("rsi_a_descer")
+            if "rsi_a_descer" not in reasons_for:
+                reasons_for.append("rsi_a_descer")
         elif rsi_slope == "up":
             score -= 1
-            reasons_against.append("rsi_a_subir")
+            if "rsi_a_subir" not in reasons_against:
+                reasons_against.append("rsi_a_subir")
 
-        if market_structure == "bearish":
+        if trigger_pattern in {
+            "shooting_star",
+            "bearish_impulse",
+            "bearish_marubozu",
+            "gravestone_doji",
+        }:
             score += 2
-            reasons_for.append("estrutura_bearish")
-        elif market_structure == "bullish":
-            score -= 2
-            reasons_against.append("estrutura_contra")
-
-        if trigger_pattern in {"shooting_star", "bearish_impulse", "bearish_marubozu", "gravestone_doji"}:
-            score += 2
-            reasons_for.append(f"trigger_pattern={trigger_pattern}")
+            token = f"trigger_pattern={trigger_pattern}"
+            if token not in reasons_for:
+                reasons_for.append(token)
         elif trigger_strength_class in {"bullish_force", "bullish"}:
-            penalty = 4 if normalized_entry_location == "breakout" else 3 if trigger_strength_class == "bullish_force" else 2
+            penalty = 5 if normalized_entry_location == "breakout" else 4
             score -= penalty
-            reasons_against.append("trigger_contra_o_setup")
+            if "trigger_contra_o_setup" not in reasons_against:
+                reasons_against.append("trigger_contra_o_setup")
         elif trigger_body_ratio < DECIMAL_POINT_40:
-            penalty = 2 if normalized_entry_location == "breakout" else 1
+            penalty = 4 if normalized_entry_location == "breakout" else 3
             score -= penalty
-            reasons_against.append("trigger_sem_forca")
+            if "trigger_sem_forca" not in reasons_against:
+                reasons_against.append("trigger_sem_forca")
+
+        if dominant_pattern in hard_rejection_sell:
+            score -= 4
+            if "padrao_de_rejeicao" not in reasons_against:
+                reasons_against.append("padrao_de_rejeicao")
 
     if adx_value is not None:
         if adx_value >= Decimal("25"):
             score += 1
-            reasons_for.append("adx_forte")
+            if "adx_forte" not in reasons_for:
+                reasons_for.append("adx_forte")
         elif adx_value < Decimal("12"):
+            penalty = 3 if normalized_entry_location == "breakout" else 2
+            score -= penalty
+            if "adx_fraco" not in reasons_against:
+                reasons_against.append("adx_fraco")
+        elif adx_value < Decimal("20"):
             penalty = 2 if normalized_entry_location == "breakout" else 1
             score -= penalty
-            reasons_against.append("adx_fraco")
+            if "adx_sem_forca" not in reasons_against:
+                reasons_against.append("adx_sem_forca")
 
     for pattern_name in active_patterns:
         pattern_weight = 1 if pattern_name in weak_patterns else 2
 
         if direction == "buy" and pattern_name in bullish_patterns:
             score += pattern_weight
-            reasons_for.append(f"padrao_favoravel={pattern_name}")
+            token = f"padrao_favoravel={pattern_name}"
+            if token not in reasons_for:
+                reasons_for.append(token)
         elif direction == "sell" and pattern_name in bearish_patterns:
             score += pattern_weight
-            reasons_for.append(f"padrao_favoravel={pattern_name}")
+            token = f"padrao_favoravel={pattern_name}"
+            if token not in reasons_for:
+                reasons_for.append(token)
         elif pattern_name in bullish_patterns or pattern_name in bearish_patterns:
-            penalty = 3 if pattern_name not in weak_patterns else 2
+            penalty = 4 if pattern_name not in weak_patterns else 2
             score -= penalty
-            reasons_against.append(f"padrao_contrario={pattern_name}")
+            token = f"padrao_contrario={pattern_name}"
+            if token not in reasons_against:
+                reasons_against.append(token)
 
     if exhaustion_detected:
         score += 1
-        reasons_for.append("exaustao_detectada")
+        if "exaustao_detectada" not in reasons_for:
+            reasons_for.append("exaustao_detectada")
 
     if impulsion_detected:
         score += 2
-        reasons_for.append("impulsao_detectada")
+        if "impulsao_detectada" not in reasons_for:
+            reasons_for.append("impulsao_detectada")
 
-    if continuity_detected and "continuidade_detectada" not in reasons_for:
+    if continuity_detected:
         score += 2
-        reasons_for.append("continuidade_detectada")
+        if "continuidade_detectada" not in reasons_for:
+            reasons_for.append("continuidade_detectada")
 
     if opposite_side_weakness:
         score += 1
-        reasons_for.append("fraqueza_do_lado_oposto")
+        if "fraqueza_do_lado_oposto" not in reasons_for:
+            reasons_for.append("fraqueza_do_lado_oposto")
 
     if not has_sequence_support:
-        penalty = 3 if normalized_entry_location == "breakout" else 2
+        penalty = 4 if normalized_entry_location == "breakout" else 3
         score -= penalty
-        reasons_against.append("sem_sequencia_confirmada")
+        if "sem_sequencia_confirmada" not in reasons_against:
+            reasons_against.append("sem_sequencia_confirmada")
 
     if market_structure == "range":
         if normalized_entry_location == "breakout":
             score -= 3
-            reasons_against.append("breakout_em_range")
+            if "breakout_em_range" not in reasons_against:
+                reasons_against.append("breakout_em_range")
         elif normalized_entry_location == "pullback":
             score -= 1
-            reasons_against.append("pullback_em_range")
+            if "pullback_em_range" not in reasons_against:
+                reasons_against.append("pullback_em_range")
+
+    hard_blockers = 0
+
+    if "ema200_contra" in reasons_against:
+        hard_blockers += 1
+
+    if "trigger_sem_forca" in reasons_against:
+        hard_blockers += 1
+
+    if "sem_sequencia_confirmada" in reasons_against:
+        hard_blockers += 1
+
+    if "padrao_de_rejeicao" in reasons_against:
+        hard_blockers += 1
+
+    if "adx_sem_forca" in reasons_against or "adx_fraco" in reasons_against:
+        hard_blockers += 1
+
+    if "macd_contra" in reasons_against:
+        hard_blockers += 1
+
+    score_cap = derive_score_cap(
+        entry_location=normalized_entry_location,
+        reasons_against=reasons_against,
+        hard_blockers=hard_blockers,
+    )
 
     final_score = clamp(score, 0, 10)
+    final_score = min(final_score, score_cap)
 
-    if final_score >= 8:
-        label = "forte"
-        action = "validar_entrada"
-    elif final_score >= 6:
-        label = "boa"
-        action = "aceitar_com_confirmacao"
-    elif final_score >= 4:
-        label = "neutra"
-        action = "ter_cautela"
-    else:
-        label = "fraca"
-        action = "evitar_entrada"
+    label, action, entry_mode = derive_decision_from_score(final_score, hard_blockers)
 
     return {
         "setup_direction": direction,
         "entry_location": normalized_entry_location,
+        "cross_state": normalized_cross_state,
         "macro_points": macro_points,
         "macro_is_strong": macro_is_strong,
         "macro_is_moderate": macro_is_moderate,
+        "hard_blockers": hard_blockers,
+        "score_cap": score_cap,
         "score": final_score,
         "score_label": label,
         "recommended_action": action,
+        "entry_mode": entry_mode,
         "reasons_for": reasons_for,
         "reasons_against": reasons_against,
     }
@@ -1034,6 +1277,11 @@ def build_candlestick_intelligence(
     adx_value: Decimal | None,
     lookback: int = 5,
     entry_location: str | None = None,
+    cross_state: str | None = None,
+    price_vs_ema_200: str | None = None,
+    short_ema_slope: str | None = None,
+    long_ema_slope: str | None = None,
+    ema_200_slope: str | None = None,
 ) -> dict[str, Any]:
     start_index = max(0, index - lookback + 1)
     window = candles[start_index : index + 1]
@@ -1047,14 +1295,20 @@ def build_candlestick_intelligence(
 
     normalized_direction = normalize_direction(setup_direction)
     normalized_entry_location = normalize_entry_location(entry_location)
+    normalized_cross_state = normalize_cross_state(cross_state)
 
     force_reading = build_force_reading(window, normalized_direction)
     confirmation = score_confirmation(
         setup_direction=normalized_direction,
         force_reading=force_reading,
         trend_alignment=trend_alignment,
-        price_vs_ema_20=price_vs_ema_20,
-        price_vs_ema_40=price_vs_ema_40,
+        price_vs_short_ema=price_vs_ema_20,
+        price_vs_long_ema=price_vs_ema_40,
+        price_vs_ema_200=str(price_vs_ema_200 or "unknown"),
+        short_ema_slope=str(short_ema_slope or "unknown"),
+        long_ema_slope=str(long_ema_slope or "unknown"),
+        ema_200_slope=str(ema_200_slope or "unknown"),
+        cross_state=normalized_cross_state,
         macd_state=macd_state,
         rsi_slope=rsi_slope,
         market_structure=market_structure,
@@ -1069,6 +1323,7 @@ def build_candlestick_intelligence(
         "objective": "classificar o candle de validação e os candles imediatamente anteriores",
         "setup_direction": normalized_direction,
         "entry_location": normalized_entry_location,
+        "cross_state": normalized_cross_state,
         "trigger_pattern": trigger_candle.get("pattern"),
         "trigger_strength_class": trigger_candle.get("strength_class"),
         "trigger_close_position": trigger_candle.get("close_position"),
@@ -1082,6 +1337,7 @@ def build_candlestick_intelligence(
         "objective": "ler sequência anterior ao cruzamento: exaustão, impulsão, continuidade e padrão clássico",
         "setup_direction": normalized_direction,
         "entry_location": normalized_entry_location,
+        "cross_state": normalized_cross_state,
         "window_size": force_reading.get("window_size"),
         "sequence_bias": force_reading.get("sequence_bias"),
         "exhaustion_detected": force_reading.get("exhaustion_detected"),
@@ -1097,12 +1353,16 @@ def build_candlestick_intelligence(
         "objective": "gerar score final de confirmação do cruzamento",
         "setup_direction": confirmation.get("setup_direction"),
         "entry_location": confirmation.get("entry_location"),
+        "cross_state": confirmation.get("cross_state"),
         "macro_points": confirmation.get("macro_points"),
         "macro_is_strong": confirmation.get("macro_is_strong"),
         "macro_is_moderate": confirmation.get("macro_is_moderate"),
+        "hard_blockers": confirmation.get("hard_blockers"),
+        "score_cap": confirmation.get("score_cap"),
         "confirmation_score": confirmation.get("score"),
         "confirmation_label": confirmation.get("score_label"),
         "recommended_action": confirmation.get("recommended_action"),
+        "entry_mode": confirmation.get("entry_mode"),
         "reasons_for": confirmation.get("reasons_for"),
         "reasons_against": confirmation.get("reasons_against"),
     }

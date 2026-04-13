@@ -14,7 +14,7 @@ from app.models.domain.strategy_config import StrategyConfig
 from app.services.candlestick_intelligence import build_candlestick_intelligence
 
 
-EMA_PERIODS = [5, 10, 20, 30, 40]
+BASE_EMA_PERIODS = [5, 10, 20, 30, 40]
 
 
 def build_case_metadata_snapshot(
@@ -31,10 +31,14 @@ def build_case_metadata_snapshot(
 
     closes = [candle.close for candle in current_slice]
 
+    short_period = int(config.parameters.get("ema_short_period", 9))
+    long_period = int(config.parameters.get("ema_long_period", 21))
+    tracked_periods = sorted(set([*BASE_EMA_PERIODS, short_period, long_period, 200]))
+
     ema_values: dict[int, Decimal | None] = {}
     ema_previous_values: dict[int, Decimal | None] = {}
 
-    for period in EMA_PERIODS:
+    for period in tracked_periods:
         current_series = exponential_moving_average_series(closes, period)
         ema_values[period] = current_series[-1] if current_series else None
         ema_previous_values[period] = current_series[-2] if len(current_series) >= 2 else None
@@ -75,6 +79,7 @@ def build_case_metadata_snapshot(
     adx_period = int(config.parameters.get("adx_period", 14))
     adx_series = average_directional_index_series(current_slice, adx_period)
     current_adx = adx_series[-1] if adx_series else None
+    previous_adx = adx_series[-2] if len(adx_series) >= 2 else None
 
     lower_band = middle_band = upper_band = None
     previous_lower = previous_middle = previous_upper = None
@@ -95,8 +100,30 @@ def build_case_metadata_snapshot(
     macd_state = classify_macd_state(current_macd, previous_macd)
     atr_regime = classify_atr_regime(current_slice, current_atr, atr_period)
 
+    short_ema_value = ema_values.get(short_period)
+    short_ema_previous = ema_previous_values.get(short_period)
+    long_ema_value = ema_values.get(long_period)
+    long_ema_previous = ema_previous_values.get(long_period)
+    ema_200_value = ema_values.get(200)
+    ema_200_previous = ema_previous_values.get(200)
+
+    price_vs_short_ema = classify_price_vs_average(current_candle.close, short_ema_value)
+    price_vs_long_ema = classify_price_vs_average(current_candle.close, long_ema_value)
     price_vs_ema_20 = classify_price_vs_average(current_candle.close, ema_values.get(20))
     price_vs_ema_40 = classify_price_vs_average(current_candle.close, ema_values.get(40))
+    price_vs_ema_200 = classify_price_vs_average(current_candle.close, ema_200_value)
+
+    short_ema_slope = slope_label(short_ema_value, short_ema_previous)
+    long_ema_slope = slope_label(long_ema_value, long_ema_previous)
+    ema_200_slope = slope_label(ema_200_value, ema_200_previous)
+    adx_slope = slope_label(current_adx, previous_adx)
+
+    cross_state = classify_cross_state(
+        current_short=short_ema_value,
+        previous_short=short_ema_previous,
+        current_long=long_ema_value,
+        previous_long=long_ema_previous,
+    )
 
     vwap_value = calculate_vwap(current_slice)
     price_vs_vwap = classify_price_vs_average(current_candle.close, vwap_value)
@@ -109,17 +136,23 @@ def build_case_metadata_snapshot(
     volume_context = classify_volume_context(volume_ratio)
 
     trend_confirmed_long = (
-        ema_alignment == "bullish"
-        and price_vs_ema_20 == "above"
-        and price_vs_ema_40 == "above"
-        and slope_label(ema_values.get(20), ema_previous_values.get(20)) == "up"
+        short_ema_value is not None
+        and long_ema_value is not None
+        and short_ema_value > long_ema_value
+        and short_ema_slope == "up"
+        and long_ema_slope == "up"
+        and price_vs_short_ema in {"above", "touching"}
+        and price_vs_long_ema == "above"
     )
 
     trend_confirmed_short = (
-        ema_alignment == "bearish"
-        and price_vs_ema_20 == "below"
-        and price_vs_ema_40 == "below"
-        and slope_label(ema_values.get(20), ema_previous_values.get(20)) == "down"
+        short_ema_value is not None
+        and long_ema_value is not None
+        and short_ema_value < long_ema_value
+        and short_ema_slope == "down"
+        and long_ema_slope == "down"
+        and price_vs_short_ema in {"below", "touching"}
+        and price_vs_long_ema == "below"
     )
 
     closed_below_lower_band = bool(lower_band is not None and current_candle.close < lower_band)
@@ -173,16 +206,20 @@ def build_case_metadata_snapshot(
 
     setup_direction = resolve_setup_direction(
         config=config,
+        cross_state=cross_state,
+        short_ema=short_ema_value,
+        long_ema=long_ema_value,
         ema_alignment=ema_alignment,
-        ema_values=ema_values,
     )
 
     entry_location = classify_entry_location(
         market_structure=market_structure,
         close=current_candle.close,
-        ema20=ema_values.get(20),
+        short_ema=short_ema_value,
+        long_ema=long_ema_value,
         lower_band=lower_band,
         upper_band=upper_band,
+        cross_state=cross_state,
     )
 
     candlestick_intelligence = build_candlestick_intelligence(
@@ -190,43 +227,67 @@ def build_case_metadata_snapshot(
         index=index,
         setup_direction=setup_direction,
         trend_alignment=ema_alignment,
-        price_vs_ema_20=price_vs_ema_20,
-        price_vs_ema_40=price_vs_ema_40,
+        price_vs_ema_20=price_vs_short_ema,
+        price_vs_ema_40=price_vs_long_ema,
         macd_state=macd_state,
         rsi_slope=slope_label(current_rsi, previous_rsi),
         market_structure=market_structure,
         adx_value=current_adx,
         entry_location=entry_location,
         lookback=5,
+        cross_state=cross_state,
+        price_vs_ema_200=price_vs_ema_200,
+        short_ema_slope=short_ema_slope,
+        long_ema_slope=long_ema_slope,
+        ema_200_slope=ema_200_slope,
     )
 
     snapshot = {
-        "snapshot_version": "1.2",
+        "snapshot_version": "2.0",
         "trigger_context": {
             "reference_time": current_candle.close_time.isoformat(),
             "reference_price": as_str(current_candle.close),
             "session": session,
             "day_of_week": current_candle.open_time.strftime("%A").lower(),
             "hour_of_day": current_candle.open_time.hour,
+            "setup_direction": setup_direction,
+            "cross_state": cross_state,
         },
         "trend": {
             "ema_5": as_str(ema_values.get(5)),
+            "ema_9": as_str(short_ema_value) if short_period == 9 else None,
             "ema_10": as_str(ema_values.get(10)),
             "ema_20": as_str(ema_values.get(20)),
+            "ema_21": as_str(long_ema_value) if long_period == 21 else None,
             "ema_30": as_str(ema_values.get(30)),
             "ema_40": as_str(ema_values.get(40)),
+            "ema_200": as_str(ema_200_value),
+            "short_ema_period": short_period,
+            "long_ema_period": long_period,
+            "short_ema": as_str(short_ema_value),
+            "long_ema": as_str(long_ema_value),
             "ema_alignment": ema_alignment,
+            "cross_state": cross_state,
+            "price_vs_short_ema": price_vs_short_ema,
+            "price_vs_long_ema": price_vs_long_ema,
             "price_vs_ema_20": price_vs_ema_20,
             "price_vs_ema_40": price_vs_ema_40,
+            "price_vs_ema_200": price_vs_ema_200,
             "price_vs_vwap": price_vs_vwap,
             "vwap_state": vwap_state,
             "adx": as_str(current_adx),
             "adx_14": as_str(current_adx),
             "ema_5_slope": slope_label(ema_values.get(5), ema_previous_values.get(5)),
+            "ema_9_slope": short_ema_slope if short_period == 9 else "unknown",
             "ema_10_slope": slope_label(ema_values.get(10), ema_previous_values.get(10)),
             "ema_20_slope": slope_label(ema_values.get(20), ema_previous_values.get(20)),
+            "ema_21_slope": long_ema_slope if long_period == 21 else "unknown",
             "ema_30_slope": slope_label(ema_values.get(30), ema_previous_values.get(30)),
             "ema_40_slope": slope_label(ema_values.get(40), ema_previous_values.get(40)),
+            "ema_200_slope": ema_200_slope,
+            "short_ema_slope": short_ema_slope,
+            "long_ema_slope": long_ema_slope,
+            "adx_slope": adx_slope,
         },
         "bollinger": {
             "period": bollinger_period,
@@ -278,18 +339,27 @@ def build_case_metadata_snapshot(
             "entry_location": entry_location,
             "distance_to_recent_support": as_str(distance_to_recent_support(current_slice)),
             "distance_to_recent_resistance": as_str(distance_to_recent_resistance(current_slice)),
+            "distance_to_short_ema": as_str(distance_to_level(current_candle.close, short_ema_value)),
+            "distance_to_long_ema": as_str(distance_to_level(current_candle.close, long_ema_value)),
             "distance_to_ema_20": as_str(distance_to_level(current_candle.close, ema_values.get(20))),
             "distance_to_ema_40": as_str(distance_to_level(current_candle.close, ema_values.get(40))),
+            "distance_to_ema_200": as_str(distance_to_level(current_candle.close, ema_200_value)),
             "price_vs_vwap": price_vs_vwap,
             "adx": as_str(current_adx),
             "adx_14": as_str(current_adx),
         },
         "trigger_candle": candle_stats,
         "patterns": {
-            "bb_reentry_long": reentered_inside_band_long,
-            "bb_reentry_short": reentered_inside_band_short,
+            "cross_up_confirmed": cross_state == "bullish_cross",
+            "cross_down_confirmed": cross_state == "bearish_cross",
             "ema_trend_confirmed_long": trend_confirmed_long,
             "ema_trend_confirmed_short": trend_confirmed_short,
+            "price_above_short_ema": price_vs_short_ema == "above",
+            "price_below_short_ema": price_vs_short_ema == "below",
+            "price_above_long_ema": price_vs_long_ema == "above",
+            "price_below_long_ema": price_vs_long_ema == "below",
+            "price_above_ema_200": price_vs_ema_200 == "above",
+            "price_below_ema_200": price_vs_ema_200 == "below",
             "rsi_recovery_long": bool(
                 previous_rsi is not None
                 and current_rsi is not None
@@ -304,6 +374,8 @@ def build_case_metadata_snapshot(
             ),
             "macd_confirmation_long": macd_state in {"bullish_cross", "bullish_above_signal"},
             "macd_confirmation_short": macd_state in {"bearish_cross", "bearish_below_signal"},
+            "bb_reentry_long": reentered_inside_band_long,
+            "bb_reentry_short": reentered_inside_band_short,
             "countertrend_long": not trend_confirmed_long,
             "countertrend_short": not trend_confirmed_short,
         },
@@ -334,8 +406,10 @@ def as_str(value: Decimal | None) -> str | None:
 
 def resolve_setup_direction(
     config: StrategyConfig,
+    cross_state: str,
+    short_ema: Decimal | None,
+    long_ema: Decimal | None,
     ema_alignment: str,
-    ema_values: dict[int, Decimal | None],
 ) -> str:
     candidates = [
         getattr(config, "direction", None),
@@ -350,27 +424,48 @@ def resolve_setup_direction(
         if normalized in {"sell", "short", "bearish", "vendedora"}:
             return "sell"
 
-    strategy_name = str(getattr(config, "name", "") or "").strip().lower()
-    strategy_key = str(getattr(config, "key", "") or "").strip().lower()
-
-    combined = f"{strategy_name} {strategy_key}"
-
-    if "bearish" in combined or "short" in combined or "sell" in combined:
-        return "sell"
-
-    if "bullish" in combined or "long" in combined or "buy" in combined:
+    if cross_state == "bullish_cross":
         return "buy"
 
-    ema9 = ema_values.get(5)
-    ema21 = ema_values.get(20)
+    if cross_state == "bearish_cross":
+        return "sell"
 
-    if ema9 is not None and ema21 is not None:
-        return "buy" if ema9 >= ema21 else "sell"
+    if short_ema is not None and long_ema is not None:
+        return "buy" if short_ema >= long_ema else "sell"
 
     if ema_alignment == "bearish":
         return "sell"
 
     return "buy"
+
+
+def classify_cross_state(
+    current_short: Decimal | None,
+    previous_short: Decimal | None,
+    current_long: Decimal | None,
+    previous_long: Decimal | None,
+) -> str:
+    if (
+        current_short is None
+        or previous_short is None
+        or current_long is None
+        or previous_long is None
+    ):
+        return "unknown"
+
+    if previous_short <= previous_long and current_short > current_long:
+        return "bullish_cross"
+
+    if previous_short >= previous_long and current_short < current_long:
+        return "bearish_cross"
+
+    if current_short > current_long:
+        return "bullish_above"
+
+    if current_short < current_long:
+        return "bearish_below"
+
+    return "flat"
 
 
 def slope_label(current: Decimal | None, previous: Decimal | None) -> str:
@@ -570,9 +665,11 @@ def classify_market_structure(candles: list[Candle]) -> str:
 def classify_entry_location(
     market_structure: str,
     close: Decimal,
-    ema20: Decimal | None,
+    short_ema: Decimal | None,
+    long_ema: Decimal | None,
     lower_band: Decimal | None,
     upper_band: Decimal | None,
+    cross_state: str,
 ) -> str:
     if lower_band is not None and close <= lower_band:
         return "range_edge"
@@ -580,10 +677,19 @@ def classify_entry_location(
     if upper_band is not None and close >= upper_band:
         return "range_edge"
 
-    if ema20 is not None:
-        distance = abs(close - ema20)
-        if distance <= Decimal("0.00030"):
-            return "pullback"
+    nearest_average = None
+    if short_ema is not None and long_ema is not None:
+        nearest_average = min(abs(close - short_ema), abs(close - long_ema))
+    elif short_ema is not None:
+        nearest_average = abs(close - short_ema)
+    elif long_ema is not None:
+        nearest_average = abs(close - long_ema)
+
+    if nearest_average is not None and nearest_average <= Decimal("0.00030"):
+        return "pullback"
+
+    if cross_state in {"bullish_cross", "bearish_cross"}:
+        return "breakout"
 
     if market_structure == "bullish":
         return "pullback"

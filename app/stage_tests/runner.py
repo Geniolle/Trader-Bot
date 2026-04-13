@@ -493,10 +493,18 @@ def build_rules_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             "bb_reentry_short": "BB reentry short",
             "ema_trend_confirmed_long": "EMA trend confirmed long",
             "ema_trend_confirmed_short": "EMA trend confirmed short",
+            "price_above_short_ema": "Price above short EMA",
+            "price_below_short_ema": "Price below short EMA",
+            "price_above_long_ema": "Price above long EMA",
+            "price_below_long_ema": "Price below long EMA",
+            "price_above_ema_200": "Price above EMA 200",
+            "price_below_ema_200": "Price below EMA 200",
             "rsi_recovery_long": "RSI recovery long",
             "rsi_recovery_short": "RSI recovery short",
             "macd_confirmation_long": "MACD confirmation long",
             "macd_confirmation_short": "MACD confirmation short",
+            "cross_up_confirmed": "Cross up confirmed",
+            "cross_down_confirmed": "Cross down confirmed",
             "countertrend_long": "Countertrend long",
             "countertrend_short": "Countertrend short",
         }
@@ -536,32 +544,42 @@ def build_indicators_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, s
     if isinstance(trigger_context, dict):
         add("Preço de referência", trigger_context.get("reference_price"))
         add("Sessão", trigger_context.get("session"))
+        add("Direção do setup", trigger_context.get("setup_direction"))
+        add("Estado do cruzamento", trigger_context.get("cross_state"))
 
     if isinstance(trend, dict):
         add("EMA 5", trend.get("ema_5"))
-        add("EMA 9", trend.get("ema_9") or trend.get("ema9") or trend.get("m9") or trend.get("ema_09"))
+        add(
+            "EMA 9",
+            trend.get("ema_9")
+            or trend.get("ema9")
+            or trend.get("m9")
+            or trend.get("short_ema"),
+        )
         add("EMA 10", trend.get("ema_10"))
         add("EMA 20", trend.get("ema_20"))
-        add("EMA 21", trend.get("ema_21") or trend.get("ema21") or trend.get("m21"))
+        add(
+            "EMA 21",
+            trend.get("ema_21")
+            or trend.get("ema21")
+            or trend.get("m21")
+            or trend.get("long_ema"),
+        )
         add("EMA 30", trend.get("ema_30"))
         add("EMA 40", trend.get("ema_40"))
-        add(
-            "Inclinação EMA 9",
-            trend.get("ema_9_slope")
-            or trend.get("ema9_slope")
-            or trend.get("slope_ema_9")
-            or trend.get("slope_m9"),
-        )
-        add(
-            "Inclinação EMA 21",
-            trend.get("ema_21_slope")
-            or trend.get("ema21_slope")
-            or trend.get("slope_ema_21")
-            or trend.get("slope_m21"),
-        )
+        add("EMA 200", trend.get("ema_200"))
+        add("Inclinação EMA 9", trend.get("ema_9_slope") or trend.get("short_ema_slope"))
+        add("Inclinação EMA 21", trend.get("ema_21_slope") or trend.get("long_ema_slope"))
+        add("Inclinação EMA 200", trend.get("ema_200_slope"))
         add("Alinhamento EMA", trend.get("ema_alignment"))
+        add("Estado do cruzamento", trend.get("cross_state"))
+        add("Preço vs EMA curta", trend.get("price_vs_short_ema"))
+        add("Preço vs EMA longa", trend.get("price_vs_long_ema"))
         add("Preço vs EMA 20", trend.get("price_vs_ema_20"))
         add("Preço vs EMA 40", trend.get("price_vs_ema_40"))
+        add("Preço vs EMA 200", trend.get("price_vs_ema_200"))
+        add("ADX", trend.get("adx"))
+        add("Inclinação ADX", trend.get("adx_slope"))
 
     if isinstance(momentum, dict):
         add("RSI 14", momentum.get("rsi_14"))
@@ -590,8 +608,11 @@ def build_indicators_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, s
         add("Local de entrada", structure.get("entry_location"))
         add("Distância ao suporte", structure.get("distance_to_recent_support"))
         add("Distância à resistência", structure.get("distance_to_recent_resistance"))
+        add("Distância à EMA curta", structure.get("distance_to_short_ema"))
+        add("Distância à EMA longa", structure.get("distance_to_long_ema"))
         add("Distância à EMA 20", structure.get("distance_to_ema_20"))
         add("Distância à EMA 40", structure.get("distance_to_ema_40"))
+        add("Distância à EMA 200", structure.get("distance_to_ema_200"))
 
     if isinstance(trigger_candle, dict):
         add("Candle open", trigger_candle.get("open"))
@@ -607,9 +628,93 @@ def build_indicators_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, s
     return indicators
 
 
+def get_phase3_confirmation(snapshot: dict[str, Any]) -> dict[str, Any]:
+    intelligence = snapshot.get("candlestick_intelligence") or {}
+    if not isinstance(intelligence, dict):
+        return {}
+
+    phase_3 = intelligence.get("phase_3_confirmation") or {}
+    if not isinstance(phase_3, dict):
+        return {}
+
+    return phase_3
+
+
+def build_case_metadata_summary(case: Any, snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    metadata = read_case_metadata(case)
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    phase_3 = get_phase3_confirmation(snapshot or {})
+
+    consolidated_metadata = dict(metadata)
+
+    if phase_3:
+        consolidated_metadata["confirmation_score"] = to_jsonable(
+            phase_3.get("confirmation_score")
+        )
+        consolidated_metadata["confirmation_label"] = to_jsonable(
+            phase_3.get("confirmation_label")
+        )
+        consolidated_metadata["recommended_action"] = to_jsonable(
+            phase_3.get("recommended_action")
+        )
+        consolidated_metadata["entry_mode"] = to_jsonable(
+            phase_3.get("entry_mode")
+        )
+        consolidated_metadata["hard_blockers"] = to_jsonable(
+            phase_3.get("hard_blockers")
+        )
+
+    if snapshot:
+        trigger_context = snapshot.get("trigger_context") or {}
+        trend = snapshot.get("trend") or {}
+        structure = snapshot.get("structure") or {}
+
+        if isinstance(trigger_context, dict):
+            if trigger_context.get("setup_direction") is not None:
+                consolidated_metadata["setup_direction"] = to_jsonable(
+                    trigger_context.get("setup_direction")
+                )
+            if trigger_context.get("cross_state") is not None:
+                consolidated_metadata["cross_state"] = to_jsonable(
+                    trigger_context.get("cross_state")
+                )
+
+        if isinstance(trend, dict):
+            for source_key, target_key in [
+                ("short_ema", "current_short_ema_snapshot"),
+                ("long_ema", "current_long_ema_snapshot"),
+                ("ema_200", "current_ema_200_snapshot"),
+                ("short_ema_slope", "short_ema_slope"),
+                ("long_ema_slope", "long_ema_slope"),
+                ("ema_200_slope", "ema_200_slope"),
+                ("price_vs_short_ema", "price_vs_short_ema"),
+                ("price_vs_long_ema", "price_vs_long_ema"),
+                ("price_vs_ema_200", "price_vs_ema_200"),
+                ("adx", "adx_snapshot"),
+                ("adx_slope", "adx_slope"),
+                ("macd_state", "macd_state"),
+            ]:
+                if trend.get(source_key) is not None:
+                    consolidated_metadata[target_key] = to_jsonable(trend.get(source_key))
+
+        if isinstance(structure, dict):
+            if structure.get("entry_location") is not None:
+                consolidated_metadata["entry_location"] = to_jsonable(
+                    structure.get("entry_location")
+                )
+            if structure.get("market_structure") is not None:
+                consolidated_metadata["market_structure"] = to_jsonable(
+                    structure.get("market_structure")
+                )
+
+    return consolidated_metadata
+
+
 def build_analysis_from_case(case: Any) -> dict[str, Any] | None:
     snapshot = read_analysis_snapshot_from_case(case)
-    metadata = read_case_metadata(case)
+    metadata = build_case_metadata_summary(case, snapshot)
 
     if not snapshot and not metadata:
         return None
@@ -657,7 +762,8 @@ def build_analysis_from_case(case: Any) -> dict[str, Any] | None:
 
 
 def serialize_case(case: Any, case_number: int) -> dict[str, Any]:
-    metadata = read_case_metadata(case)
+    snapshot = read_analysis_snapshot_from_case(case)
+    metadata = build_case_metadata_summary(case, snapshot)
     analysis = build_analysis_from_case(case)
 
     case_id = (
@@ -689,7 +795,10 @@ def serialize_case(case: Any, case_number: int) -> dict[str, Any]:
         "max_adverse_excursion": to_jsonable(
             safe_attr(case, "max_adverse_excursion")
         ),
-        "close_reason": to_jsonable(safe_attr(case, "close_reason")),
+        "close_reason": to_jsonable(
+            safe_attr(case, "close_reason")
+            or metadata.get("close_reason")
+        ),
         "analysis": to_jsonable(analysis),
         "metadata": to_jsonable(metadata),
     }
@@ -716,6 +825,7 @@ def debug_first_serialized_case(serialized_cases: list[dict[str, Any]]) -> None:
     snapshot = analysis.get("snapshot") if isinstance(analysis, dict) else None
     trend = snapshot.get("trend") if isinstance(snapshot, dict) else None
     indicators = analysis.get("indicators") if isinstance(analysis, dict) else None
+    metadata = first_case.get("metadata") if isinstance(first_case, dict) else None
 
     print(
         "[STAGE_TESTS][DEBUG] FIRST_CASE_KEYS="
@@ -736,6 +846,10 @@ def debug_first_serialized_case(serialized_cases: list[dict[str, Any]]) -> None:
         )
     )
     print(
+        "[STAGE_TESTS][DEBUG] FIRST_METADATA_JSON="
+        + json.dumps(metadata, ensure_ascii=False, default=str)
+    )
+    print(
         "[STAGE_TESTS][DEBUG] FIRST_TREND_JSON="
         + json.dumps(trend, ensure_ascii=False, default=str)
     )
@@ -746,25 +860,28 @@ def debug_first_serialized_case(serialized_cases: list[dict[str, Any]]) -> None:
             "ema_9": trend.get("ema_9"),
             "ema9": trend.get("ema9"),
             "m9": trend.get("m9"),
-            "ema_09": trend.get("ema_09"),
+            "short_ema": trend.get("short_ema"),
             "ema_9_slope": trend.get("ema_9_slope"),
-            "ema9_slope": trend.get("ema9_slope"),
-            "slope_ema_9": trend.get("slope_ema_9"),
-            "slope_m9": trend.get("slope_m9"),
+            "short_ema_slope": trend.get("short_ema_slope"),
             "ema_10": trend.get("ema_10"),
             "ema_20": trend.get("ema_20"),
             "ema_21": trend.get("ema_21"),
             "ema21": trend.get("ema21"),
             "m21": trend.get("m21"),
+            "long_ema": trend.get("long_ema"),
             "ema_21_slope": trend.get("ema_21_slope"),
-            "ema21_slope": trend.get("ema21_slope"),
-            "slope_ema_21": trend.get("slope_ema_21"),
-            "slope_m21": trend.get("slope_m21"),
+            "long_ema_slope": trend.get("long_ema_slope"),
             "ema_30": trend.get("ema_30"),
             "ema_40": trend.get("ema_40"),
+            "ema_200": trend.get("ema_200"),
+            "ema_200_slope": trend.get("ema_200_slope"),
             "ema_alignment": trend.get("ema_alignment"),
+            "cross_state": trend.get("cross_state"),
+            "price_vs_short_ema": trend.get("price_vs_short_ema"),
+            "price_vs_long_ema": trend.get("price_vs_long_ema"),
             "price_vs_ema_20": trend.get("price_vs_ema_20"),
             "price_vs_ema_40": trend.get("price_vs_ema_40"),
+            "price_vs_ema_200": trend.get("price_vs_ema_200"),
         }
     else:
         ema_debug = None
