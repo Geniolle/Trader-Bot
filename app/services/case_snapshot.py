@@ -1,4 +1,6 @@
-# app/services/case_snapshot.py
+# C:\Trader-bot\app\services\case_snapshot.py
+
+from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 
@@ -9,6 +11,7 @@ from app.indicators.macd import macd_series
 from app.indicators.rsi import relative_strength_index_series
 from app.models.domain.candle import Candle
 from app.models.domain.strategy_config import StrategyConfig
+from app.services.candlestick_intelligence import build_candlestick_intelligence
 
 
 EMA_PERIODS = [5, 10, 20, 30, 40]
@@ -168,8 +171,28 @@ def build_case_metadata_snapshot(
 
     band_distance_ratio = distance_outside_band
 
+    setup_direction = resolve_setup_direction(
+        config=config,
+        ema_alignment=ema_alignment,
+        ema_values=ema_values,
+    )
+
+    candlestick_intelligence = build_candlestick_intelligence(
+        candles=candles,
+        index=index,
+        setup_direction=setup_direction,
+        trend_alignment=ema_alignment,
+        price_vs_ema_20=price_vs_ema_20,
+        price_vs_ema_40=price_vs_ema_40,
+        macd_state=macd_state,
+        rsi_slope=slope_label(current_rsi, previous_rsi),
+        market_structure=market_structure,
+        adx_value=current_adx,
+        lookback=5,
+    )
+
     snapshot = {
-        "snapshot_version": "1.1",
+        "snapshot_version": "1.2",
         "trigger_context": {
             "reference_time": current_candle.close_time.isoformat(),
             "reference_price": as_str(current_candle.close),
@@ -294,6 +317,7 @@ def build_case_metadata_snapshot(
             "state": vwap_state,
             "signal": vwap_state,
         },
+        "candlestick_intelligence": candlestick_intelligence,
     }
 
     return snapshot
@@ -303,6 +327,47 @@ def as_str(value: Decimal | None) -> str | None:
     if value is None:
         return None
     return format(value.normalize(), "f")
+
+
+def resolve_setup_direction(
+    config: StrategyConfig,
+    ema_alignment: str,
+    ema_values: dict[int, Decimal | None],
+) -> str:
+    candidates = [
+        getattr(config, "direction", None),
+        getattr(config, "trade_bias", None),
+        getattr(config, "side", None),
+    ]
+
+    for candidate in candidates:
+        normalized = str(candidate or "").strip().lower()
+        if normalized in {"buy", "long", "bullish", "compradora"}:
+            return "buy"
+        if normalized in {"sell", "short", "bearish", "vendedora"}:
+            return "sell"
+
+    strategy_name = str(getattr(config, "name", "") or "").strip().lower()
+    strategy_key = str(getattr(config, "key", "") or "").strip().lower()
+
+    combined = f"{strategy_name} {strategy_key}"
+
+    if "bearish" in combined or "short" in combined or "sell" in combined:
+        return "sell"
+
+    if "bullish" in combined or "long" in combined or "buy" in combined:
+        return "buy"
+
+    ema9 = ema_values.get(5)
+    ema21 = ema_values.get(20)
+
+    if ema9 is not None and ema21 is not None:
+        return "buy" if ema9 >= ema21 else "sell"
+
+    if ema_alignment == "bearish":
+        return "sell"
+
+    return "buy"
 
 
 def slope_label(current: Decimal | None, previous: Decimal | None) -> str:
@@ -419,22 +484,22 @@ def classify_session(hour: int) -> str:
 
 def build_candle_stats(candle: Candle) -> dict:
     body = abs(candle.close - candle.open)
-    candle_range = candle.high - candle.low
+    c_range = candle.high - candle.low
 
-    upper_wick = candle.high - max(candle.open, candle.close)
-    lower_wick = min(candle.open, candle.close) - candle.low
+    upper = candle.high - max(candle.open, candle.close)
+    lower = min(candle.open, candle.close) - candle.low
 
     body_ratio = None
-    if candle_range > 0:
-        body_ratio = body / candle_range
+    if c_range > 0:
+        body_ratio = body / c_range
 
     candle_type = classify_candle_type(
         open_price=candle.open,
         close_price=candle.close,
         body=body,
-        upper_wick=upper_wick,
-        lower_wick=lower_wick,
-        candle_range=candle_range,
+        upper_wick=upper,
+        lower_wick=lower,
+        candle_range=c_range,
     )
 
     return {
@@ -443,8 +508,8 @@ def build_candle_stats(candle: Candle) -> dict:
         "low": as_str(candle.low),
         "close": as_str(candle.close),
         "body_size": as_str(body),
-        "upper_wick": as_str(upper_wick),
-        "lower_wick": as_str(lower_wick),
+        "upper_wick": as_str(upper),
+        "lower_wick": as_str(lower),
         "body_ratio": as_str(body_ratio),
         "candle_type": candle_type,
     }
@@ -461,9 +526,9 @@ def classify_candle_type(
     if candle_range == 0:
         return "flat"
 
-    body_ratio = body / candle_range
+    ratio = body / candle_range
 
-    if body_ratio <= Decimal("0.15"):
+    if ratio <= Decimal("0.15"):
         return "doji"
 
     if lower_wick > body * Decimal("1.5") and close_price > open_price:
@@ -472,10 +537,10 @@ def classify_candle_type(
     if upper_wick > body * Decimal("1.5") and close_price < open_price:
         return "rejection"
 
-    if close_price > open_price and body_ratio >= Decimal("0.6"):
+    if close_price > open_price and ratio >= Decimal("0.6"):
         return "bullish_impulse"
 
-    if close_price < open_price and body_ratio >= Decimal("0.6"):
+    if close_price < open_price and ratio >= Decimal("0.6"):
         return "bearish_impulse"
 
     return "balanced"
@@ -601,11 +666,7 @@ def calculate_volume_ratio(candles: list[Candle]) -> Decimal | None:
 
     current_volume = candles[-1].volume if candles[-1].volume is not None else Decimal("0")
     baseline_source = candles[-20:-1] if len(candles) > 1 else candles[-20:]
-    volumes = [
-        candle.volume
-        for candle in baseline_source
-        if candle.volume is not None
-    ]
+    volumes = [candle.volume for candle in baseline_source if candle.volume is not None]
 
     if not volumes:
         return None
@@ -623,11 +684,7 @@ def calculate_volume_zscore(candles: list[Candle]) -> Decimal | None:
 
     current_volume = candles[-1].volume if candles[-1].volume is not None else Decimal("0")
     baseline_source = candles[-20:-1] if len(candles) > 1 else candles[-20:]
-    values = [
-        candle.volume
-        for candle in baseline_source
-        if candle.volume is not None
-    ]
+    values = [candle.volume for candle in baseline_source if candle.volume is not None]
 
     if len(values) < 2:
         return None
@@ -753,16 +810,8 @@ def average_directional_index_series(
         up_move = current.high - previous.high
         down_move = previous.low - current.low
 
-        plus_dm = (
-            up_move
-            if up_move > 0 and up_move > down_move
-            else Decimal("0")
-        )
-        minus_dm = (
-            down_move
-            if down_move > 0 and down_move > up_move
-            else Decimal("0")
-        )
+        plus_dm = up_move if up_move > 0 and up_move > down_move else Decimal("0")
+        minus_dm = down_move if down_move > 0 and down_move > up_move else Decimal("0")
 
         tr = max(
             current.high - current.low,
