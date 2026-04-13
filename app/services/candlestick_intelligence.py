@@ -13,12 +13,15 @@ DECIMAL_ONE = Decimal("1")
 DECIMAL_TWO = Decimal("2")
 DECIMAL_HALF = Decimal("0.5")
 
+DECIMAL_POINT_10 = Decimal("0.10")
+DECIMAL_POINT_12 = Decimal("0.12")
 DECIMAL_POINT_15 = Decimal("0.15")
 DECIMAL_POINT_20 = Decimal("0.20")
 DECIMAL_POINT_25 = Decimal("0.25")
 DECIMAL_POINT_30 = Decimal("0.30")
 DECIMAL_POINT_35 = Decimal("0.35")
 DECIMAL_POINT_40 = Decimal("0.40")
+DECIMAL_POINT_45 = Decimal("0.45")
 DECIMAL_POINT_50 = Decimal("0.50")
 DECIMAL_POINT_55 = Decimal("0.55")
 DECIMAL_POINT_60 = Decimal("0.60")
@@ -51,6 +54,21 @@ def normalize_direction(direction: str | None) -> str:
     if normalized in {"sell", "short", "bearish", "vendedora"}:
         return "sell"
     return "buy"
+
+
+def normalize_entry_location(entry_location: str | None) -> str:
+    normalized = str(entry_location or "").strip().lower()
+
+    if normalized in {"breakout", "rompimento"}:
+        return "breakout"
+
+    if normalized in {"pullback", "retest", "reteste"}:
+        return "pullback"
+
+    if normalized in {"mid_range", "range", "meio_range", "meio-de-range"}:
+        return "mid_range"
+
+    return "unknown"
 
 
 def candle_color(candle: Candle) -> str:
@@ -142,10 +160,18 @@ def classify_single_candle_pattern(candle: Candle) -> str:
     if c_body_ratio <= DECIMAL_POINT_35 and c_upper >= c_body * DECIMAL_TWO and c_lower >= c_body:
         return "spinning_top"
 
-    if c_body <= c_range * DECIMAL_POINT_35 and c_lower >= c_body * DECIMAL_TWO and c_upper <= c_body * DECIMAL_HALF:
+    if (
+        c_body <= c_range * DECIMAL_POINT_35
+        and c_lower >= c_body * DECIMAL_TWO
+        and c_upper <= c_body * DECIMAL_HALF
+    ):
         return "hammer"
 
-    if c_body <= c_range * DECIMAL_POINT_35 and c_upper >= c_body * DECIMAL_TWO and c_lower <= c_body * DECIMAL_HALF:
+    if (
+        c_body <= c_range * DECIMAL_POINT_35
+        and c_upper >= c_body * DECIMAL_TWO
+        and c_lower <= c_body * DECIMAL_HALF
+    ):
         return "shooting_star"
 
     if c_body_ratio >= DECIMAL_POINT_60:
@@ -214,10 +240,51 @@ def body_midpoint(candle: Candle) -> Decimal:
     return (candle.open + candle.close) / DECIMAL_TWO
 
 
+def has_meaningful_body(candle: Candle, minimum_ratio: Decimal = DECIMAL_POINT_55) -> bool:
+    return body_ratio(candle) >= minimum_ratio
+
+
+def is_small_star_body(candle: Candle) -> bool:
+    ratio = body_ratio(candle)
+    return ratio <= DECIMAL_POINT_35
+
+
+def has_small_force_body(candle: Candle) -> bool:
+    return body_ratio(candle) < DECIMAL_POINT_45
+
+
+def strong_bearish_context(a: Candle, b: Candle | None = None) -> bool:
+    candles = [a] if b is None else [a, b]
+    bearish_count = sum(1 for candle in candles if candle_color(candle) == "bearish")
+    bearish_force_count = sum(
+        1 for candle in candles if classify_strength_class(candle) == "bearish_force"
+    )
+    closes_lower = True
+    if len(candles) == 2:
+        closes_lower = candles[1].close <= candles[0].close
+
+    return bearish_count == len(candles) and bearish_force_count >= 1 and closes_lower
+
+
+def strong_bullish_context(a: Candle, b: Candle | None = None) -> bool:
+    candles = [a] if b is None else [a, b]
+    bullish_count = sum(1 for candle in candles if candle_color(candle) == "bullish")
+    bullish_force_count = sum(
+        1 for candle in candles if classify_strength_class(candle) == "bullish_force"
+    )
+    closes_higher = True
+    if len(candles) == 2:
+        closes_higher = candles[1].close >= candles[0].close
+
+    return bullish_count == len(candles) and bullish_force_count >= 1 and closes_higher
+
+
 def detect_bullish_engulfing(prev_candle: Candle, current_candle: Candle) -> bool:
     return (
         is_bearish(prev_candle)
         and is_bullish(current_candle)
+        and has_meaningful_body(prev_candle, DECIMAL_POINT_50)
+        and has_meaningful_body(current_candle, DECIMAL_POINT_55)
         and current_candle.open <= prev_candle.close
         and current_candle.close >= prev_candle.open
     )
@@ -227,6 +294,8 @@ def detect_bearish_engulfing(prev_candle: Candle, current_candle: Candle) -> boo
     return (
         is_bullish(prev_candle)
         and is_bearish(current_candle)
+        and has_meaningful_body(prev_candle, DECIMAL_POINT_50)
+        and has_meaningful_body(current_candle, DECIMAL_POINT_55)
         and current_candle.open >= prev_candle.close
         and current_candle.close <= prev_candle.open
     )
@@ -240,7 +309,9 @@ def detect_bullish_harami(prev_candle: Candle, current_candle: Candle) -> bool:
 
     return (
         is_bearish(prev_candle)
-        and is_bullish(current_candle)
+        and has_meaningful_body(prev_candle, DECIMAL_POINT_60)
+        and candle_body(current_candle) > 0
+        and body_ratio(current_candle) <= DECIMAL_POINT_45
         and curr_low_body >= prev_low_body
         and curr_high_body <= prev_high_body
     )
@@ -254,7 +325,9 @@ def detect_bearish_harami(prev_candle: Candle, current_candle: Candle) -> bool:
 
     return (
         is_bullish(prev_candle)
-        and is_bearish(current_candle)
+        and has_meaningful_body(prev_candle, DECIMAL_POINT_60)
+        and candle_body(current_candle) > 0
+        and body_ratio(current_candle) <= DECIMAL_POINT_45
         and curr_low_body >= prev_low_body
         and curr_high_body <= prev_high_body
     )
@@ -263,7 +336,10 @@ def detect_bearish_harami(prev_candle: Candle, current_candle: Candle) -> bool:
 def detect_piercing_line(prev_candle: Candle, current_candle: Candle) -> bool:
     return (
         is_bearish(prev_candle)
+        and strong_bearish_context(prev_candle)
+        and has_meaningful_body(prev_candle, DECIMAL_POINT_60)
         and is_bullish(current_candle)
+        and has_meaningful_body(current_candle, DECIMAL_POINT_55)
         and current_candle.close > body_midpoint(prev_candle)
         and current_candle.close < prev_candle.open
     )
@@ -272,7 +348,10 @@ def detect_piercing_line(prev_candle: Candle, current_candle: Candle) -> bool:
 def detect_dark_cloud_cover(prev_candle: Candle, current_candle: Candle) -> bool:
     return (
         is_bullish(prev_candle)
+        and strong_bullish_context(prev_candle)
+        and has_meaningful_body(prev_candle, DECIMAL_POINT_60)
         and is_bearish(current_candle)
+        and has_meaningful_body(current_candle, DECIMAL_POINT_55)
         and current_candle.close < body_midpoint(prev_candle)
         and current_candle.close > prev_candle.open
     )
@@ -280,36 +359,70 @@ def detect_dark_cloud_cover(prev_candle: Candle, current_candle: Candle) -> bool
 
 def detect_morning_star(a: Candle, b: Candle, c: Candle) -> bool:
     return (
-        is_bearish(a)
+        strong_bearish_context(a)
+        and is_bearish(a)
+        and has_meaningful_body(a, DECIMAL_POINT_60)
+        and is_small_star_body(b)
         and candle_body(b) <= candle_body(a) * DECIMAL_HALF
         and is_bullish(c)
+        and has_meaningful_body(c, DECIMAL_POINT_55)
         and c.close > body_midpoint(a)
+        and c.close > b.close
     )
 
 
 def detect_evening_star(a: Candle, b: Candle, c: Candle) -> bool:
     return (
-        is_bullish(a)
+        strong_bullish_context(a)
+        and is_bullish(a)
+        and has_meaningful_body(a, DECIMAL_POINT_60)
+        and is_small_star_body(b)
         and candle_body(b) <= candle_body(a) * DECIMAL_HALF
         and is_bearish(c)
+        and has_meaningful_body(c, DECIMAL_POINT_55)
         and c.close < body_midpoint(a)
+        and c.close < b.close
     )
 
 
 def detect_three_inside_up(a: Candle, b: Candle, c: Candle) -> bool:
-    return detect_bullish_harami(a, b) and is_bullish(c) and c.close > max(a.open, a.close)
+    return (
+        strong_bearish_context(a)
+        and detect_bullish_harami(a, b)
+        and is_bullish(c)
+        and has_meaningful_body(c, DECIMAL_POINT_55)
+        and c.close > max(a.open, a.close)
+    )
 
 
 def detect_three_inside_down(a: Candle, b: Candle, c: Candle) -> bool:
-    return detect_bearish_harami(a, b) and is_bearish(c) and c.close < min(a.open, a.close)
+    return (
+        strong_bullish_context(a)
+        and detect_bearish_harami(a, b)
+        and is_bearish(c)
+        and has_meaningful_body(c, DECIMAL_POINT_55)
+        and c.close < min(a.open, a.close)
+    )
 
 
 def detect_three_outside_up(a: Candle, b: Candle, c: Candle) -> bool:
-    return detect_bullish_engulfing(a, b) and is_bullish(c) and c.close >= b.close
+    return (
+        strong_bearish_context(a)
+        and detect_bullish_engulfing(a, b)
+        and is_bullish(c)
+        and has_meaningful_body(c, DECIMAL_POINT_55)
+        and c.close >= b.close
+    )
 
 
 def detect_three_outside_down(a: Candle, b: Candle, c: Candle) -> bool:
-    return detect_bearish_engulfing(a, b) and is_bearish(c) and c.close <= b.close
+    return (
+        strong_bullish_context(a)
+        and detect_bearish_engulfing(a, b)
+        and is_bearish(c)
+        and has_meaningful_body(c, DECIMAL_POINT_55)
+        and c.close <= b.close
+    )
 
 
 def detect_three_white_soldiers(window: list[Candle]) -> bool:
@@ -317,7 +430,8 @@ def detect_three_white_soldiers(window: list[Candle]) -> bool:
         return False
 
     last_three = window[-3:]
-    return all(
+    closes_higher = all(last_three[i].close >= last_three[i - 1].close for i in range(1, 3))
+    return closes_higher and all(
         is_bullish(candle)
         and body_ratio(candle) >= DECIMAL_POINT_55
         and upper_wick_ratio(candle) <= DECIMAL_POINT_25
@@ -330,7 +444,8 @@ def detect_three_black_crows(window: list[Candle]) -> bool:
         return False
 
     last_three = window[-3:]
-    return all(
+    closes_lower = all(last_three[i].close <= last_three[i - 1].close for i in range(1, 3))
+    return closes_lower and all(
         is_bearish(candle)
         and body_ratio(candle) >= DECIMAL_POINT_55
         and lower_wick_ratio(candle) <= DECIMAL_POINT_25
@@ -573,9 +688,14 @@ def build_macro_context(
     macd_state: str,
     market_structure: str,
     continuity_detected: bool,
+    impulsion_detected: bool,
+    exhaustion_detected: bool,
+    entry_location: str | None = None,
 ) -> dict[str, Any]:
     macro_points = 0
     macro_signals: list[str] = []
+
+    normalized_entry_location = normalize_entry_location(entry_location)
 
     if direction == "buy":
         if trend_alignment == "bullish":
@@ -614,6 +734,24 @@ def build_macro_context(
         macro_points += 1
         macro_signals.append("continuidade_detectada")
 
+    if impulsion_detected:
+        macro_points += 1
+        macro_signals.append("impulsao_detectada")
+
+    if exhaustion_detected:
+        macro_points += 1
+        macro_signals.append("exaustao_detectada")
+
+    has_sequence_support = continuity_detected or impulsion_detected or exhaustion_detected
+
+    if normalized_entry_location == "breakout" and market_structure == "range":
+        macro_points -= 2
+        macro_signals.append("contexto_range_para_breakout")
+
+    if normalized_entry_location == "breakout" and not has_sequence_support:
+        macro_points -= 2
+        macro_signals.append("breakout_sem_sequencia")
+
     macro_is_strong = macro_points >= 4
     macro_is_moderate = macro_points >= 3
 
@@ -635,8 +773,10 @@ def score_confirmation(
     rsi_slope: str,
     market_structure: str,
     adx_value: Decimal | None,
+    entry_location: str | None = None,
 ) -> dict[str, Any]:
     direction = normalize_direction(setup_direction)
+    normalized_entry_location = normalize_entry_location(entry_location)
 
     score = 0
     reasons_for: list[str] = []
@@ -646,6 +786,8 @@ def score_confirmation(
     trigger_strength_class = str(
         force_reading.get("trigger_candle", {}).get("strength_class", "")
     ).strip()
+    trigger_body_ratio_raw = force_reading.get("trigger_candle", {}).get("body_ratio")
+    trigger_body_ratio = Decimal(str(trigger_body_ratio_raw or "0"))
     active_patterns = force_reading.get("active_patterns", [])
     exhaustion_detected = bool(force_reading.get("exhaustion_detected"))
     impulsion_detected = bool(force_reading.get("impulsion_detected"))
@@ -670,6 +812,12 @@ def score_confirmation(
         "three_black_crows",
         "bearish_harami",
     }
+    weak_patterns = {
+        "bullish_harami",
+        "bearish_harami",
+    }
+
+    has_sequence_support = continuity_detected or impulsion_detected or exhaustion_detected
 
     macro_context = build_macro_context(
         direction=direction,
@@ -679,6 +827,9 @@ def score_confirmation(
         macd_state=macd_state,
         market_structure=market_structure,
         continuity_detected=continuity_detected,
+        impulsion_detected=impulsion_detected,
+        exhaustion_detected=exhaustion_detected,
+        entry_location=normalized_entry_location,
     )
 
     macro_points = int(macro_context["macro_points"])
@@ -728,11 +879,14 @@ def score_confirmation(
         if trigger_pattern in {"hammer", "bullish_impulse", "bullish_marubozu", "dragonfly_doji"}:
             score += 2
             reasons_for.append(f"trigger_pattern={trigger_pattern}")
-        elif trigger_strength_class == "bearish_force":
-            penalty = 0 if macro_is_strong else 1 if macro_is_moderate else 2
-            if penalty > 0:
-                score -= penalty
-                reasons_against.append("trigger_contra_o_setup")
+        elif trigger_strength_class in {"bearish_force", "bearish"}:
+            penalty = 4 if normalized_entry_location == "breakout" else 3 if trigger_strength_class == "bearish_force" else 2
+            score -= penalty
+            reasons_against.append("trigger_contra_o_setup")
+        elif trigger_body_ratio < DECIMAL_POINT_40:
+            penalty = 2 if normalized_entry_location == "breakout" else 1
+            score -= penalty
+            reasons_against.append("trigger_sem_forca")
 
     else:
         if trend_alignment == "bearish":
@@ -777,34 +931,37 @@ def score_confirmation(
         if trigger_pattern in {"shooting_star", "bearish_impulse", "bearish_marubozu", "gravestone_doji"}:
             score += 2
             reasons_for.append(f"trigger_pattern={trigger_pattern}")
-        elif trigger_strength_class == "bullish_force":
-            penalty = 0 if macro_is_strong else 1 if macro_is_moderate else 2
-            if penalty > 0:
-                score -= penalty
-                reasons_against.append("trigger_contra_o_setup")
+        elif trigger_strength_class in {"bullish_force", "bullish"}:
+            penalty = 4 if normalized_entry_location == "breakout" else 3 if trigger_strength_class == "bullish_force" else 2
+            score -= penalty
+            reasons_against.append("trigger_contra_o_setup")
+        elif trigger_body_ratio < DECIMAL_POINT_40:
+            penalty = 2 if normalized_entry_location == "breakout" else 1
+            score -= penalty
+            reasons_against.append("trigger_sem_forca")
 
     if adx_value is not None:
         if adx_value >= Decimal("25"):
             score += 1
             reasons_for.append("adx_forte")
         elif adx_value < Decimal("12"):
-            penalty = 0 if macro_is_strong else 1
-            if penalty > 0:
-                score -= penalty
-                reasons_against.append("adx_fraco")
+            penalty = 2 if normalized_entry_location == "breakout" else 1
+            score -= penalty
+            reasons_against.append("adx_fraco")
 
     for pattern_name in active_patterns:
+        pattern_weight = 1 if pattern_name in weak_patterns else 2
+
         if direction == "buy" and pattern_name in bullish_patterns:
-            score += 2
+            score += pattern_weight
             reasons_for.append(f"padrao_favoravel={pattern_name}")
         elif direction == "sell" and pattern_name in bearish_patterns:
-            score += 2
+            score += pattern_weight
             reasons_for.append(f"padrao_favoravel={pattern_name}")
         elif pattern_name in bullish_patterns or pattern_name in bearish_patterns:
-            penalty = 0 if macro_is_strong else 1 if macro_is_moderate else 2
-            if penalty > 0:
-                score -= penalty
-                reasons_against.append(f"padrao_contrario={pattern_name}")
+            penalty = 3 if pattern_name not in weak_patterns else 2
+            score -= penalty
+            reasons_against.append(f"padrao_contrario={pattern_name}")
 
     if exhaustion_detected:
         score += 1
@@ -821,6 +978,19 @@ def score_confirmation(
     if opposite_side_weakness:
         score += 1
         reasons_for.append("fraqueza_do_lado_oposto")
+
+    if not has_sequence_support:
+        penalty = 3 if normalized_entry_location == "breakout" else 2
+        score -= penalty
+        reasons_against.append("sem_sequencia_confirmada")
+
+    if market_structure == "range":
+        if normalized_entry_location == "breakout":
+            score -= 3
+            reasons_against.append("breakout_em_range")
+        elif normalized_entry_location == "pullback":
+            score -= 1
+            reasons_against.append("pullback_em_range")
 
     final_score = clamp(score, 0, 10)
 
@@ -839,6 +1009,7 @@ def score_confirmation(
 
     return {
         "setup_direction": direction,
+        "entry_location": normalized_entry_location,
         "macro_points": macro_points,
         "macro_is_strong": macro_is_strong,
         "macro_is_moderate": macro_is_moderate,
@@ -862,6 +1033,7 @@ def build_candlestick_intelligence(
     market_structure: str,
     adx_value: Decimal | None,
     lookback: int = 5,
+    entry_location: str | None = None,
 ) -> dict[str, Any]:
     start_index = max(0, index - lookback + 1)
     window = candles[start_index : index + 1]
@@ -874,6 +1046,7 @@ def build_candlestick_intelligence(
         }
 
     normalized_direction = normalize_direction(setup_direction)
+    normalized_entry_location = normalize_entry_location(entry_location)
 
     force_reading = build_force_reading(window, normalized_direction)
     confirmation = score_confirmation(
@@ -886,6 +1059,7 @@ def build_candlestick_intelligence(
         rsi_slope=rsi_slope,
         market_structure=market_structure,
         adx_value=adx_value,
+        entry_location=normalized_entry_location,
     )
 
     trigger_candle = force_reading.get("trigger_candle", {})
@@ -894,6 +1068,7 @@ def build_candlestick_intelligence(
     phase_1 = {
         "objective": "classificar o candle de validação e os candles imediatamente anteriores",
         "setup_direction": normalized_direction,
+        "entry_location": normalized_entry_location,
         "trigger_pattern": trigger_candle.get("pattern"),
         "trigger_strength_class": trigger_candle.get("strength_class"),
         "trigger_close_position": trigger_candle.get("close_position"),
@@ -906,6 +1081,7 @@ def build_candlestick_intelligence(
     phase_2 = {
         "objective": "ler sequência anterior ao cruzamento: exaustão, impulsão, continuidade e padrão clássico",
         "setup_direction": normalized_direction,
+        "entry_location": normalized_entry_location,
         "window_size": force_reading.get("window_size"),
         "sequence_bias": force_reading.get("sequence_bias"),
         "exhaustion_detected": force_reading.get("exhaustion_detected"),
@@ -920,6 +1096,7 @@ def build_candlestick_intelligence(
     phase_3 = {
         "objective": "gerar score final de confirmação do cruzamento",
         "setup_direction": confirmation.get("setup_direction"),
+        "entry_location": confirmation.get("entry_location"),
         "macro_points": confirmation.get("macro_points"),
         "macro_is_strong": confirmation.get("macro_is_strong"),
         "macro_is_moderate": confirmation.get("macro_is_moderate"),

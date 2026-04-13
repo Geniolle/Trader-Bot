@@ -177,6 +177,14 @@ def build_case_metadata_snapshot(
         ema_values=ema_values,
     )
 
+    entry_location = classify_entry_location(
+        market_structure=market_structure,
+        close=current_candle.close,
+        ema20=ema_values.get(20),
+        lower_band=lower_band,
+        upper_band=upper_band,
+    )
+
     candlestick_intelligence = build_candlestick_intelligence(
         candles=candles,
         index=index,
@@ -188,6 +196,7 @@ def build_case_metadata_snapshot(
         rsi_slope=slope_label(current_rsi, previous_rsi),
         market_structure=market_structure,
         adx_value=current_adx,
+        entry_location=entry_location,
         lookback=5,
     )
 
@@ -266,13 +275,7 @@ def build_case_metadata_snapshot(
         },
         "structure": {
             "market_structure": market_structure,
-            "entry_location": classify_entry_location(
-                market_structure=market_structure,
-                close=current_candle.close,
-                ema20=ema_values.get(20),
-                lower_band=lower_band,
-                upper_band=upper_band,
-            ),
+            "entry_location": entry_location,
             "distance_to_recent_support": as_str(distance_to_recent_support(current_slice)),
             "distance_to_recent_resistance": as_str(distance_to_recent_resistance(current_slice)),
             "distance_to_ema_20": as_str(distance_to_level(current_candle.close, ema_values.get(20))),
