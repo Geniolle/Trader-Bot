@@ -1,3 +1,5 @@
+# C:\Trader-bot\app\stage_tests\runner.py
+
 from __future__ import annotations
 
 import argparse
@@ -537,10 +539,26 @@ def build_indicators_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, s
 
     if isinstance(trend, dict):
         add("EMA 5", trend.get("ema_5"))
+        add("EMA 9", trend.get("ema_9") or trend.get("ema9") or trend.get("m9") or trend.get("ema_09"))
         add("EMA 10", trend.get("ema_10"))
         add("EMA 20", trend.get("ema_20"))
+        add("EMA 21", trend.get("ema_21") or trend.get("ema21") or trend.get("m21"))
         add("EMA 30", trend.get("ema_30"))
         add("EMA 40", trend.get("ema_40"))
+        add(
+            "Inclinação EMA 9",
+            trend.get("ema_9_slope")
+            or trend.get("ema9_slope")
+            or trend.get("slope_ema_9")
+            or trend.get("slope_m9"),
+        )
+        add(
+            "Inclinação EMA 21",
+            trend.get("ema_21_slope")
+            or trend.get("ema21_slope")
+            or trend.get("slope_ema_21")
+            or trend.get("slope_m21"),
+        )
         add("Alinhamento EMA", trend.get("ema_alignment"))
         add("Preço vs EMA 20", trend.get("price_vs_ema_20"))
         add("Preço vs EMA 40", trend.get("price_vs_ema_40"))
@@ -686,6 +704,79 @@ def select_best_analysis_case(closed_cases: list[Any], open_cases: list[Any]) ->
             return case
 
     return None
+
+
+def debug_first_serialized_case(serialized_cases: list[dict[str, Any]]) -> None:
+    if not serialized_cases:
+        print("[STAGE_TESTS][DEBUG] FIRST_CASE=None")
+        return
+
+    first_case = serialized_cases[0]
+    analysis = first_case.get("analysis")
+    snapshot = analysis.get("snapshot") if isinstance(analysis, dict) else None
+    trend = snapshot.get("trend") if isinstance(snapshot, dict) else None
+    indicators = analysis.get("indicators") if isinstance(analysis, dict) else None
+
+    print(
+        "[STAGE_TESTS][DEBUG] FIRST_CASE_KEYS="
+        + json.dumps(list(first_case.keys()), ensure_ascii=False)
+    )
+    print(
+        "[STAGE_TESTS][DEBUG] FIRST_ANALYSIS_KEYS="
+        + json.dumps(
+            list(analysis.keys()) if isinstance(analysis, dict) else None,
+            ensure_ascii=False,
+        )
+    )
+    print(
+        "[STAGE_TESTS][DEBUG] FIRST_SNAPSHOT_KEYS="
+        + json.dumps(
+            list(snapshot.keys()) if isinstance(snapshot, dict) else None,
+            ensure_ascii=False,
+        )
+    )
+    print(
+        "[STAGE_TESTS][DEBUG] FIRST_TREND_JSON="
+        + json.dumps(trend, ensure_ascii=False, default=str)
+    )
+
+    if isinstance(trend, dict):
+        ema_debug = {
+            "ema_5": trend.get("ema_5"),
+            "ema_9": trend.get("ema_9"),
+            "ema9": trend.get("ema9"),
+            "m9": trend.get("m9"),
+            "ema_09": trend.get("ema_09"),
+            "ema_9_slope": trend.get("ema_9_slope"),
+            "ema9_slope": trend.get("ema9_slope"),
+            "slope_ema_9": trend.get("slope_ema_9"),
+            "slope_m9": trend.get("slope_m9"),
+            "ema_10": trend.get("ema_10"),
+            "ema_20": trend.get("ema_20"),
+            "ema_21": trend.get("ema_21"),
+            "ema21": trend.get("ema21"),
+            "m21": trend.get("m21"),
+            "ema_21_slope": trend.get("ema_21_slope"),
+            "ema21_slope": trend.get("ema21_slope"),
+            "slope_ema_21": trend.get("slope_ema_21"),
+            "slope_m21": trend.get("slope_m21"),
+            "ema_30": trend.get("ema_30"),
+            "ema_40": trend.get("ema_40"),
+            "ema_alignment": trend.get("ema_alignment"),
+            "price_vs_ema_20": trend.get("price_vs_ema_20"),
+            "price_vs_ema_40": trend.get("price_vs_ema_40"),
+        }
+    else:
+        ema_debug = None
+
+    print(
+        "[STAGE_TESTS][DEBUG] FIRST_TREND_EMA_DEBUG="
+        + json.dumps(ema_debug, ensure_ascii=False, default=str)
+    )
+    print(
+        "[STAGE_TESTS][DEBUG] FIRST_INDICATORS_JSON="
+        + json.dumps(indicators, ensure_ascii=False, default=str)
+    )
 
 
 def main() -> None:
@@ -856,6 +947,8 @@ def main() -> None:
         serialize_case(case, case_number=index + 1)
         for index, case in enumerate(closed_cases)
     ]
+
+    debug_first_serialized_case(serialized_cases)
 
     print(f"PRIMEIRO               : {first_row['open_time']}")
     print(f"ÚLTIMO                 : {last_row['open_time']}")

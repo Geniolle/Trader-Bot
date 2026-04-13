@@ -1,3 +1,5 @@
+# C:\Trader-bot\app\services\stage_tests_service.py
+
 from __future__ import annotations
 
 import json
@@ -355,9 +357,72 @@ def run_stage_test(
         errors="replace",
     )
 
-    metrics = extract_metrics_from_stdout(result.stdout or "")
+    stdout_text = result.stdout or ""
+    stderr_text = result.stderr or ""
+
+    if stdout_text.strip():
+        logger.info("[STAGE_TESTS] runner stdout:\n%s", stdout_text)
+    else:
+        logger.info("[STAGE_TESTS] runner stdout: <vazio>")
+
+    if stderr_text.strip():
+        logger.info("[STAGE_TESTS] runner stderr:\n%s", stderr_text)
+    else:
+        logger.info("[STAGE_TESTS] runner stderr: <vazio>")
+
+    metrics = extract_metrics_from_stdout(stdout_text)
     analysis = extract_analysis_from_metrics(metrics)
     cases = extract_cases_from_metrics(metrics)
+
+    if isinstance(metrics, dict):
+        logger.info(
+            "[STAGE_TESTS] metrics keys=%s",
+            sorted(metrics.keys()),
+        )
+    else:
+        logger.info("[STAGE_TESTS] metrics keys=<sem metrics>")
+
+    if isinstance(analysis, dict):
+        logger.info(
+            "[STAGE_TESTS] analysis keys=%s",
+            sorted(analysis.keys()),
+        )
+    else:
+        logger.info("[STAGE_TESTS] analysis keys=<sem analysis>")
+
+    if isinstance(cases, list) and cases:
+        first_case = cases[0]
+        logger.info(
+            "[STAGE_TESTS] first case keys=%s",
+            sorted(first_case.keys()),
+        )
+
+        first_analysis = first_case.get("analysis")
+        if isinstance(first_analysis, dict):
+            logger.info(
+                "[STAGE_TESTS] first case analysis keys=%s",
+                sorted(first_analysis.keys()),
+            )
+            snapshot = first_analysis.get("snapshot")
+            if isinstance(snapshot, dict):
+                logger.info(
+                    "[STAGE_TESTS] first case snapshot keys=%s",
+                    sorted(snapshot.keys()),
+                )
+                trend = snapshot.get("trend")
+                if isinstance(trend, dict):
+                    logger.info(
+                        "[STAGE_TESTS] first case trend=%s",
+                        json.dumps(trend, ensure_ascii=False, default=str),
+                    )
+                else:
+                    logger.info("[STAGE_TESTS] first case trend=<sem trend>")
+            else:
+                logger.info("[STAGE_TESTS] first case snapshot=<sem snapshot>")
+        else:
+            logger.info("[STAGE_TESTS] first case analysis=<sem analysis>")
+    else:
+        logger.info("[STAGE_TESTS] first case=<sem cases>")
 
     logger.info(
         "[STAGE_TESTS] run concluído | return_code=%s | ok=%s | metrics_present=%s | analysis_present=%s | cases_present=%s",
@@ -374,8 +439,8 @@ def run_stage_test(
         "symbol": normalize_symbol(symbol),
         "timeframe": timeframe,
         "strategy": strategy,
-        "stdout": result.stdout or "",
-        "stderr": result.stderr or "",
+        "stdout": stdout_text,
+        "stderr": stderr_text,
         "return_code": int(result.returncode),
         "metrics": metrics,
         "analysis": analysis,
