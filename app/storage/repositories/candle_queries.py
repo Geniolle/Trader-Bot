@@ -1,72 +1,108 @@
 from __future__ import annotations
 
-from datetime import datetime
-
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from app.storage.models import Candle
+from app.storage.models import CandleModel
 
 
 class CandleQueryRepository:
-    def _build_stmt(
+    def list_all_by_symbol_timeframe(
         self,
+        session,
         symbol: str,
         timeframe: str,
-        start_at: datetime | None = None,
-        end_at: datetime | None = None,
+    ) -> list[CandleModel]:
+        return (
+            session.query(CandleModel)
+            .filter(
+                CandleModel.symbol == symbol,
+                CandleModel.timeframe == timeframe,
+            )
+            .order_by(CandleModel.open_time.asc(), CandleModel.id.asc())
+            .all()
+        )
+
+    def latest_by_symbol_timeframe(
+        self,
+        session,
+        symbol: str,
+        timeframe: str,
+    ) -> CandleModel | None:
+        return (
+            session.query(CandleModel)
+            .filter(
+                CandleModel.symbol == symbol,
+                CandleModel.timeframe == timeframe,
+            )
+            .order_by(CandleModel.open_time.desc(), CandleModel.id.desc())
+            .first()
+        )
+
+    def list_forward_from_open_time(
+        self,
+        session,
+        symbol: str,
+        timeframe: str,
+        open_time,
         limit: int | None = None,
-    ):
-        stmt = (
-            select(Candle)
-            .where(Candle.symbol == symbol)
-            .where(Candle.timeframe == timeframe)
-            .order_by(Candle.open_time.asc())
+    ) -> list[CandleModel]:
+        query = (
+            session.query(CandleModel)
+            .filter(
+                CandleModel.symbol == symbol,
+                CandleModel.timeframe == timeframe,
+                CandleModel.open_time > open_time,
+            )
+            .order_by(CandleModel.open_time.asc(), CandleModel.id.asc())
+        )
+
+        if isinstance(limit, int) and limit > 0:
+            query = query.limit(limit)
+
+        return query.all()
+
+    def list_by_symbol_timeframe_range(
+        self,
+        session,
+        symbol: str,
+        timeframe: str,
+        start_at=None,
+        end_at=None,
+    ) -> list[CandleModel]:
+        query = session.query(CandleModel).filter(
+            CandleModel.symbol == symbol,
+            CandleModel.timeframe == timeframe,
         )
 
         if start_at is not None:
-            stmt = stmt.where(Candle.open_time >= start_at)
+            query = query.filter(CandleModel.open_time >= start_at)
 
         if end_at is not None:
-            stmt = stmt.where(Candle.open_time <= end_at)
+            query = query.filter(CandleModel.close_time <= end_at)
 
-        if limit is not None:
-            stmt = stmt.limit(limit)
-
-        return stmt
+        return query.order_by(CandleModel.open_time.asc(), CandleModel.id.asc()).all()
 
     def list_by_filters(
         self,
-        session: Session,
+        session,
         symbol: str,
         timeframe: str,
-        start_at: datetime | None = None,
-        end_at: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[Candle]:
-        stmt = self._build_stmt(
-            symbol=symbol,
-            timeframe=timeframe,
-            start_at=start_at,
-            end_at=end_at,
-            limit=limit,
+        start_at=None,
+        end_at=None,
+        limit: int | None = 500,
+    ) -> list[CandleModel]:
+        query = session.query(CandleModel).filter(
+            CandleModel.symbol == symbol,
+            CandleModel.timeframe == timeframe,
         )
-        return list(session.scalars(stmt).all())
 
-    def list_candles(
-        self,
-        session: Session,
-        symbol: str,
-        timeframe: str,
-        start_at: datetime | None = None,
-        end_at: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[Candle]:
-        return self.list_by_filters(
-            session=session,
-            symbol=symbol,
-            timeframe=timeframe,
-            start_at=start_at,
-            end_at=end_at,
-            limit=limit,
-        )
+        if start_at is not None:
+            query = query.filter(CandleModel.open_time >= start_at)
+
+        if end_at is not None:
+            query = query.filter(CandleModel.close_time <= end_at)
+
+        query = query.order_by(CandleModel.open_time.asc(), CandleModel.id.asc())
+
+        if isinstance(limit, int) and limit > 0:
+            query = query.limit(limit)
+
+        return query.all()
