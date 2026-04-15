@@ -1,3 +1,7 @@
+# C:\Trader-bot\app\services\candle_sync.py
+
+from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -49,7 +53,7 @@ class CandleSyncService:
             normalized_end_at.isoformat(),
         )
 
-        rows = self.query_repository.list_by_symbol_timeframe_range(
+        rows_in_requested_range = self.query_repository.list_by_symbol_timeframe_range(
             session=session,
             symbol=normalized_symbol,
             timeframe=normalized_timeframe,
@@ -65,16 +69,17 @@ class CandleSyncService:
 
         logger.info(
             "[CANDLE_SYNC] BASE_LOCAL | COUNT_RANGE=%s | HAS_LATEST=%s",
-            len(rows),
+            len(rows_in_requested_range),
             latest_local is not None,
         )
 
-        if rows and latest_local is not None:
+        if latest_local is not None:
+            latest_local_open_time = ensure_naive_utc(latest_local.open_time)
             latest_local_close_time = ensure_naive_utc(latest_local.close_time)
 
             logger.info(
                 "[CANDLE_SYNC] ÚLTIMO_LOCAL | OPEN=%s | CLOSE=%s",
-                ensure_naive_utc(latest_local.open_time).isoformat(),
+                latest_local_open_time.isoformat(),
                 latest_local_close_time.isoformat(),
             )
 
@@ -99,10 +104,10 @@ class CandleSyncService:
 
         if latest_local is None:
             bootstrap_limit = self._bootstrap_limit_for_timeframe(normalized_timeframe)
+            timeframe_step = timeframe_to_timedelta(normalized_timeframe)
             bootstrap_start = max(
                 normalized_start_at,
-                normalized_end_at
-                - (timeframe_to_timedelta(normalized_timeframe) * bootstrap_limit),
+                normalized_end_at - (timeframe_step * bootstrap_limit),
             )
 
             logger.info(
@@ -138,7 +143,7 @@ class CandleSyncService:
             )
 
         latest_close = ensure_naive_utc(latest_local.close_time)
-        latest_open = ensure_naive_utc(latest_local.open_time)
+        timeframe_step = timeframe_to_timedelta(normalized_timeframe)
 
         if latest_close >= normalized_end_at:
             logger.info("[CANDLE_SYNC] LOCAL_JÁ_ATUAL | PROVIDER=NO")
@@ -151,7 +156,12 @@ class CandleSyncService:
                 reason="local_latest_already_current",
             )
 
-        gap_start = latest_open
+        # Regra principal:
+        # usar o histórico local para trás e pedir ao provider somente o que está à frente.
+        # Começamos no frontier local (close_time do último candle) para evitar regressão
+        # desnecessária ao passado. Se o provider devolver novamente o último candle,
+        # a camada de save_many/upsert deve absorver a duplicação.
+        gap_start = latest_close
         gap_end = normalized_end_at
 
         missing_bars = self._count_bars_between(
@@ -181,9 +191,8 @@ class CandleSyncService:
         max_gap_bars = max(10, self.settings.candles_gap_fill_max_bars)
         if missing_bars > max_gap_bars:
             gap_start = max(
-                normalized_start_at,
-                normalized_end_at
-                - (timeframe_to_timedelta(normalized_timeframe) * max_gap_bars),
+                latest_close,
+                normalized_end_at - (timeframe_step * max_gap_bars),
             )
             logger.info(
                 "[CANDLE_SYNC] GAP_LIMIT_APLICADO | MAX_GAP_BARS=%s | NEW_GAP_START=%s",
@@ -213,7 +222,7 @@ class CandleSyncService:
             timeframe=normalized_timeframe,
             used_provider=True,
             fetched_count=len(candles),
-            reason="gap_fill",
+            reason="gap_fill_forward_only",
         )
 
     def _bootstrap_limit_for_timeframe(self, timeframe: str) -> int:
