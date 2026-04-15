@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     twelvedata_api_key: str = Field(default="")
     twelvedata_base_url: str = Field(default="https://api.twelvedata.com")
 
+    binance_api_key: str = Field(default="")
+    binance_api_secret: str = Field(default="")
+    binance_base_url: str = Field(default="https://api.binance.com")
+
     database_url: str = Field(default="sqlite:///./market_research_lab.db")
     stage_test_run_command: str = Field(default="python -m app.stage_tests.runner")
 
