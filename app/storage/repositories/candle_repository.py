@@ -1,52 +1,75 @@
-from __future__ import annotations
+from uuid import uuid4
 
-from datetime import datetime
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.exc import FlushError
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from app.models.domain.candle import Candle
+from app.storage.models import CandleModel
 
-from app.storage.models import Candle
+
+def _new_uuid() -> str:
+    return str(uuid4())
 
 
 class CandleRepository:
-    def get_by_symbol_timeframe_open_time(
-        self,
-        session: Session,
-        symbol: str,
-        timeframe: str,
-        open_time: datetime,
-    ) -> Candle | None:
-        stmt = (
-            select(Candle)
-            .where(Candle.symbol == symbol)
-            .where(Candle.timeframe == timeframe)
-            .where(Candle.open_time == open_time)
-        )
-        return session.scalar(stmt)
+    def save_many(self, session, candles: list[Candle]) -> list[CandleModel]:
+        saved_items: list[CandleModel] = []
 
-    def list_by_range(
-        self,
-        session: Session,
-        symbol: str,
-        timeframe: str,
-        start_at: datetime | None = None,
-        end_at: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[Candle]:
-        stmt = (
-            select(Candle)
-            .where(Candle.symbol == symbol)
-            .where(Candle.timeframe == timeframe)
-            .order_by(Candle.open_time.asc())
-        )
+        for candle in candles:
+            db_existing = (
+                session.query(CandleModel)
+                .filter(
+                    CandleModel.symbol == candle.symbol,
+                    CandleModel.timeframe == candle.timeframe,
+                    CandleModel.open_time == candle.open_time,
+                )
+                .first()
+            )
 
-        if start_at is not None:
-            stmt = stmt.where(Candle.open_time >= start_at)
+            if db_existing is not None:
+                saved_items.append(db_existing)
+                continue
 
-        if end_at is not None:
-            stmt = stmt.where(Candle.open_time <= end_at)
+            db_obj = CandleModel(
+                id=_new_uuid(),
+                asset_id=candle.asset_id,
+                symbol=candle.symbol,
+                timeframe=candle.timeframe,
+                open_time=candle.open_time,
+                close_time=candle.close_time,
+                open=candle.open,
+                high=candle.high,
+                low=candle.low,
+                close=candle.close,
+                volume=candle.volume,
+                source=candle.source,
+            )
 
-        if limit is not None:
-            stmt = stmt.limit(limit)
+            session.add(db_obj)
 
-        return list(session.scalars(stmt).all())
+            try:
+                session.commit()
+                saved_items.append(db_obj)
+            except (IntegrityError, FlushError):
+                session.rollback()
+
+                db_existing = (
+                    session.query(CandleModel)
+                    .filter(
+                        CandleModel.symbol == candle.symbol,
+                        CandleModel.timeframe == candle.timeframe,
+                        CandleModel.open_time == candle.open_time,
+                    )
+                    .first()
+                )
+
+                if db_existing is not None:
+                    saved_items.append(db_existing)
+                    continue
+
+                raise
+            except Exception:
+                session.rollback()
+                raise
+
+        return saved_items
