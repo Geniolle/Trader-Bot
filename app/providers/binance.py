@@ -72,8 +72,8 @@ class BinanceProvider(BaseMarketDataProvider):
             if not isinstance(item, list) or len(item) < 7:
                 continue
 
-            open_time = datetime.fromtimestamp(item[0] / 1000)
-            close_time = datetime.fromtimestamp(item[6] / 1000)
+            open_time = datetime.utcfromtimestamp(item[0] / 1000)
+            close_time = datetime.utcfromtimestamp(item[6] / 1000)
 
             candles.append(
                 Candle(
