@@ -1,3 +1,5 @@
+# G:\O meu disco\python\Trader-bot\app\api\v1\router.py
+
 from fastapi import APIRouter
 
 from app.api.v1.endpoints.batch_runs import router as batch_runs_router

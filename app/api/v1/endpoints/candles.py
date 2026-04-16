@@ -1,13 +1,15 @@
+# G:\O meu disco\python\Trader-bot\app\api\v1\endpoints\candles.py
+
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.settings import get_settings
-from app.providers.factory import MarketDataProviderFactory
 from app.schemas.run import CandleResponse
+from app.services.candle_sync import CandleSyncService
 from app.storage.database import SessionLocal
 from app.storage.repositories.candle_queries import CandleQueryRepository
-from app.storage.repositories.candle_repository import CandleRepository
+from app.utils.datetime_utils import ensure_naive_utc, floor_open_time
 
 router = APIRouter(prefix="/candles", tags=["candles"])
 
@@ -27,6 +29,26 @@ def _build_candle_response(row) -> CandleResponse:
         volume=row.volume,
         source=row.source,
     )
+
+
+def _normalize_symbol(symbol: str) -> str:
+    return symbol.strip().upper()
+
+
+def _normalize_timeframe(timeframe: str) -> str:
+    aliases = {
+        "1min": "1m",
+        "3min": "3m",
+        "5min": "5m",
+        "15min": "15m",
+        "30min": "30m",
+        "60min": "1h",
+        "1hr": "1h",
+        "4hr": "4h",
+        "1day": "1d",
+    }
+    normalized = timeframe.strip().lower()
+    return aliases.get(normalized, normalized)
 
 
 def _normalize_provider(provider: str | None) -> str:
@@ -65,6 +87,14 @@ def _timeframe_to_delta(timeframe: str) -> timedelta:
     return delta
 
 
+def _resolve_sync_end(timeframe: str, requested_end_at: datetime | None) -> datetime:
+    if requested_end_at is not None:
+        return ensure_naive_utc(requested_end_at)
+
+    now = ensure_naive_utc(datetime.utcnow())
+    return floor_open_time(now, timeframe)
+
+
 def _resolve_range(
     *,
     timeframe: str,
@@ -73,23 +103,22 @@ def _resolve_range(
     end_at: datetime | None,
     limit: int,
 ) -> tuple[datetime, datetime]:
-    now = datetime.utcnow()
-    delta = _timeframe_to_delta(timeframe)
+    normalized_timeframe = _normalize_timeframe(timeframe)
+    resolved_end = _resolve_sync_end(normalized_timeframe, end_at)
+    delta = _timeframe_to_delta(normalized_timeframe)
 
     normalized_mode = (mode or "full").strip().lower()
 
     if normalized_mode == "incremental":
-        resolved_end = end_at or now
-        resolved_start = start_at or (resolved_end - (delta * 3))
+        resolved_start = ensure_naive_utc(start_at) if start_at else (resolved_end - (delta * 3))
 
         if resolved_start >= resolved_end:
             resolved_start = resolved_end - (delta * 3)
 
         return resolved_start, resolved_end
 
-    resolved_end = end_at or now
     bars = max(limit, 300)
-    resolved_start = start_at or (resolved_end - (delta * bars))
+    resolved_start = ensure_naive_utc(start_at) if start_at else (resolved_end - (delta * bars))
 
     if resolved_start >= resolved_end:
         resolved_start = resolved_end - (delta * bars)
@@ -97,7 +126,7 @@ def _resolve_range(
     return resolved_start, resolved_end
 
 
-def _sync_candles_if_needed(
+def _ensure_local_coverage_if_enabled(
     *,
     session,
     provider_name: str,
@@ -117,33 +146,14 @@ def _sync_candles_if_needed(
     if start_at >= end_at:
         return
 
-    try:
-        market_provider = MarketDataProviderFactory().get_provider(provider_name)
-    except KeyError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Provider not found: {provider_name}",
-        ) from exc
-
-    try:
-        candles = market_provider.get_historical_candles(
-            symbol=symbol,
-            timeframe=timeframe,
-            start_at=start_at,
-            end_at=end_at,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Provider sync failed for {provider_name}: {exc}",
-        ) from exc
-
-    if not candles:
-        return
-
-    CandleRepository().save_many(session=session, candles=candles)
+    CandleSyncService().ensure_local_coverage(
+        session=session,
+        symbol=symbol,
+        timeframe=timeframe,
+        start_at=start_at,
+        end_at=end_at,
+        provider_name=provider_name,
+    )
 
 
 @router.get("", response_model=list[CandleResponse])
@@ -158,28 +168,31 @@ def list_candles(
 ) -> list[CandleResponse]:
     session = SessionLocal()
     try:
+        normalized_symbol = _normalize_symbol(symbol)
+        normalized_timeframe = _normalize_timeframe(timeframe)
         provider_name = _normalize_provider(provider)
+
         resolved_start_at, resolved_end_at = _resolve_range(
-            timeframe=timeframe,
+            timeframe=normalized_timeframe,
             mode=mode,
             start_at=start_at,
             end_at=end_at,
             limit=limit,
         )
 
-        _sync_candles_if_needed(
+        _ensure_local_coverage_if_enabled(
             session=session,
             provider_name=provider_name,
-            symbol=symbol,
-            timeframe=timeframe,
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
             start_at=resolved_start_at,
             end_at=resolved_end_at,
         )
 
         rows = CandleQueryRepository().list_by_filters(
             session=session,
-            symbol=symbol,
-            timeframe=timeframe,
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
             start_at=resolved_start_at,
             end_at=resolved_end_at,
             limit=limit,
@@ -199,27 +212,31 @@ def get_latest_candle(
 ) -> CandleResponse:
     session = SessionLocal()
     try:
-        provider_name = _normalize_provider(provider)
         settings = get_settings()
 
-        timeframe_delta = _timeframe_to_delta(timeframe)
+        normalized_symbol = _normalize_symbol(symbol)
+        normalized_timeframe = _normalize_timeframe(timeframe)
+        provider_name = _normalize_provider(provider)
+
+        timeframe_delta = _timeframe_to_delta(normalized_timeframe)
         reconcile_bars = max(settings.candle_cache_reconcile_bars, 3)
-        sync_end_at = datetime.utcnow()
+
+        sync_end_at = _resolve_sync_end(normalized_timeframe, None)
         sync_start_at = sync_end_at - (timeframe_delta * reconcile_bars)
 
-        _sync_candles_if_needed(
+        _ensure_local_coverage_if_enabled(
             session=session,
             provider_name=provider_name,
-            symbol=symbol,
-            timeframe=timeframe,
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
             start_at=sync_start_at,
             end_at=sync_end_at,
         )
 
         row = CandleQueryRepository().get_latest(
             session=session,
-            symbol=symbol,
-            timeframe=timeframe,
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
             source=provider_name,
         )
 
@@ -227,8 +244,8 @@ def get_latest_candle(
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    f"No candle found for symbol={symbol}, "
-                    f"timeframe={timeframe}, provider={provider_name}"
+                    f"No candle found for symbol={normalized_symbol}, "
+                    f"timeframe={normalized_timeframe}, provider={provider_name}"
                 ),
             )
 

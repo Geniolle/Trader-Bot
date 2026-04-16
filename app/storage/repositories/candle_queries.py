@@ -1,6 +1,25 @@
-from datetime import datetime
+# G:\O meu disco\python\Trader-bot\app\storage\repositories\candle_queries.py
 
 from app.storage.models import CandleModel
+
+
+def _normalize_symbol(value: str) -> str:
+    return value.strip().upper()
+
+
+def _normalize_timeframe(value: str) -> str:
+    return value.strip().lower()
+
+
+def _normalize_source(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+
+    return normalized
 
 
 class CandleQueryRepository:
@@ -9,41 +28,46 @@ class CandleQueryRepository:
         session,
         symbol: str,
         timeframe: str,
-        start_at: datetime,
-        end_at: datetime,
+        start_at,
+        end_at,
         source: str | None = None,
     ) -> list[CandleModel]:
         query = session.query(CandleModel).filter(
-            CandleModel.symbol == symbol,
-            CandleModel.timeframe == timeframe,
+            CandleModel.symbol == _normalize_symbol(symbol),
+            CandleModel.timeframe == _normalize_timeframe(timeframe),
             CandleModel.open_time >= start_at,
             CandleModel.close_time <= end_at,
         )
 
-        if source:
-            query = query.filter(CandleModel.source == source)
+        normalized_source = _normalize_source(source)
+        if normalized_source is not None:
+            query = query.filter(CandleModel.source == normalized_source)
 
-        return query.order_by(CandleModel.open_time.asc(), CandleModel.id.asc()).all()
+        return (
+            query.order_by(CandleModel.open_time.asc(), CandleModel.id.asc())
+            .all()
+        )
 
     def list_by_filters(
         self,
         session,
         symbol: str,
         timeframe: str,
-        start_at: datetime,
-        end_at: datetime,
+        start_at,
+        end_at,
         limit: int = 500,
         source: str | None = None,
     ) -> list[CandleModel]:
         query = session.query(CandleModel).filter(
-            CandleModel.symbol == symbol,
-            CandleModel.timeframe == timeframe,
+            CandleModel.symbol == _normalize_symbol(symbol),
+            CandleModel.timeframe == _normalize_timeframe(timeframe),
             CandleModel.open_time >= start_at,
             CandleModel.close_time <= end_at,
         )
 
-        if source:
-            query = query.filter(CandleModel.source == source)
+        normalized_source = _normalize_source(source)
+        if normalized_source is not None:
+            query = query.filter(CandleModel.source == normalized_source)
 
         return (
             query.order_by(CandleModel.open_time.asc(), CandleModel.id.asc())
@@ -59,12 +83,13 @@ class CandleQueryRepository:
         source: str | None = None,
     ) -> CandleModel | None:
         query = session.query(CandleModel).filter(
-            CandleModel.symbol == symbol,
-            CandleModel.timeframe == timeframe,
+            CandleModel.symbol == _normalize_symbol(symbol),
+            CandleModel.timeframe == _normalize_timeframe(timeframe),
         )
 
-        if source:
-            query = query.filter(CandleModel.source == source)
+        normalized_source = _normalize_source(source)
+        if normalized_source is not None:
+            query = query.filter(CandleModel.source == normalized_source)
 
         return (
             query.order_by(CandleModel.open_time.desc(), CandleModel.id.desc())

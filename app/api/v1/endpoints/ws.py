@@ -1,15 +1,18 @@
+# G:\O meu disco\python\Trader-bot\app\api\v1\endpoints\ws.py
+
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.settings import get_settings
 from app.providers.factory import MarketDataProviderFactory
 from app.providers.twelvedata import ProviderQuotaExceededError
+from app.services.candle_sync import CandleSyncService
 from app.storage.database import SessionLocal
 from app.storage.repositories.candle_queries import CandleQueryRepository
+from app.utils.datetime_utils import ensure_naive_utc, floor_open_time
 
 router = APIRouter(tags=["ws"])
 
@@ -34,6 +37,16 @@ def normalize_timeframe(value: str | None) -> str:
     }
 
     return aliases.get(normalized, normalized)
+
+
+def normalize_provider(value: str | None) -> str:
+    settings = get_settings()
+    resolved = (value or settings.market_data_provider or "mock").strip().lower()
+
+    if not resolved:
+        return "mock"
+
+    return resolved
 
 
 def normalize_datetime(value: datetime) -> datetime:
@@ -118,12 +131,44 @@ def serialize_candle_row(row) -> dict:
         "close": str(row.close),
         "volume": str(row.volume),
         "source": row.source,
+        "provider": row.source,
     }
 
 
-def load_initial_candles(symbol: str, timeframe: str) -> list[dict]:
-    now = normalize_datetime(datetime.utcnow())
-    start_at = now - timeframe_to_window(timeframe)
+def sync_recent_closed_candles(symbol: str, timeframe: str, provider_name: str) -> None:
+    settings = get_settings()
+
+    if not settings.candle_cache_enabled:
+        return
+
+    if not settings.candle_cache_sync_on_read:
+        return
+
+    now = ensure_naive_utc(datetime.utcnow())
+    sync_end = floor_open_time(now, timeframe)
+    sync_start = sync_end - timeframe_to_window(timeframe)
+
+    if sync_start >= sync_end:
+        return
+
+    session = SessionLocal()
+    try:
+        CandleSyncService().ensure_local_coverage(
+            session=session,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_at=sync_start,
+            end_at=sync_end,
+            provider_name=provider_name,
+        )
+    finally:
+        session.close()
+
+
+def load_initial_candles(symbol: str, timeframe: str, provider_name: str) -> list[dict]:
+    now = ensure_naive_utc(datetime.utcnow())
+    end_at = floor_open_time(now, timeframe)
+    start_at = end_at - timeframe_to_window(timeframe)
 
     session = SessionLocal()
     try:
@@ -132,37 +177,46 @@ def load_initial_candles(symbol: str, timeframe: str) -> list[dict]:
             symbol=symbol,
             timeframe=timeframe,
             start_at=start_at,
-            end_at=now,
+            end_at=end_at,
             limit=5000,
+            source=provider_name,
         )
         return [serialize_candle_row(row) for row in rows]
     finally:
         session.close()
 
 
-def load_last_closed_candle(symbol: str, timeframe: str):
-    now = normalize_datetime(datetime.utcnow())
-    start_at = now - timeframe_to_window(timeframe)
+def load_last_closed_candle(symbol: str, timeframe: str, provider_name: str):
+    now = ensure_naive_utc(datetime.utcnow())
+    end_at = floor_open_time(now, timeframe)
+    start_at = end_at - timeframe_to_window(timeframe)
 
     session = SessionLocal()
     try:
-        rows = CandleQueryRepository().list_by_filters(
+        row = CandleQueryRepository().get_latest(
             session=session,
             symbol=symbol,
             timeframe=timeframe,
-            start_at=start_at,
-            end_at=now,
-            limit=1,
+            source=provider_name,
         )
-        if not rows:
+
+        if row is None:
             return None
-        return rows[-1]
+
+        row_close = normalize_datetime(row.close_time)
+        if row_close > end_at:
+            return None
+
+        if row.open_time < start_at:
+            return None
+
+        return row
     finally:
         session.close()
 
 
-def build_tick_from_last_closed(symbol: str, timeframe: str) -> dict | None:
-    row = load_last_closed_candle(symbol, timeframe)
+def build_tick_from_last_closed(symbol: str, timeframe: str, provider_name: str) -> dict | None:
+    row = load_last_closed_candle(symbol, timeframe, provider_name)
     if row is None:
         return None
 
@@ -180,18 +234,18 @@ def build_tick_from_last_closed(symbol: str, timeframe: str) -> dict | None:
         "market_session": None,
         "timezone": "UTC",
         "is_delayed": True,
-        "is_mock": True,
+        "is_mock": row.source == "mock",
     }
 
 
-def try_build_live_tick(symbol: str, timeframe: str) -> dict | None:
-    settings = get_settings()
-    provider = MarketDataProviderFactory().get_provider(settings.market_data_provider)
+def try_build_live_tick(symbol: str, timeframe: str, provider_name: str) -> dict | None:
+    provider = MarketDataProviderFactory().get_provider(provider_name)
 
-    now = normalize_datetime(datetime.utcnow())
+    now = ensure_naive_utc(datetime.utcnow())
     candle_delta = timeframe_to_timedelta(timeframe)
-    bucket_open = floor_time_to_bucket(now, timeframe)
-    request_start = bucket_open - candle_delta
+    current_bucket_open = floor_time_to_bucket(now, timeframe)
+
+    request_start = current_bucket_open - candle_delta
     request_end = now
 
     candles = provider.get_historical_candles(
@@ -206,14 +260,11 @@ def try_build_live_tick(symbol: str, timeframe: str) -> dict | None:
 
     latest = candles[-1]
     latest_open = normalize_datetime(latest.open_time)
-    current_bucket_open = floor_time_to_bucket(now, timeframe)
-
-    tick_open = latest_open if latest_open >= current_bucket_open else current_bucket_open
 
     return {
         "symbol": symbol,
         "timeframe": timeframe,
-        "open_time": tick_open.isoformat(),
+        "open_time": latest_open.isoformat(),
         "open": float(latest.open),
         "high": float(latest.high),
         "low": float(latest.low),
@@ -223,15 +274,12 @@ def try_build_live_tick(symbol: str, timeframe: str) -> dict | None:
         "provider": provider.provider_name(),
         "market_session": None,
         "timezone": "UTC",
-        "is_delayed": False,
-        "is_mock": False,
+        "is_delayed": latest_open < current_bucket_open,
+        "is_mock": provider.provider_name() == "mock",
     }
 
 
-async def emit_heartbeat(
-    websocket: WebSocket,
-    count: int,
-) -> None:
+async def emit_heartbeat(websocket: WebSocket, count: int) -> None:
     await websocket.send_json(
         {
             "event": "heartbeat",
@@ -248,6 +296,7 @@ async def emit_provider_error(
     message: str,
     symbol: str,
     timeframe: str,
+    provider_name: str | None = None,
 ) -> None:
     await websocket.send_json(
         {
@@ -256,6 +305,7 @@ async def emit_provider_error(
                 "message": message,
                 "symbol": symbol,
                 "timeframe": timeframe,
+                "provider": provider_name,
             },
         }
     )
@@ -287,12 +337,24 @@ async def websocket_feed(websocket: WebSocket) -> None:
     async def run_stream(
         symbol: str,
         timeframe: str,
+        provider_name: str,
         market_type: str | None,
         catalog: str | None,
     ) -> None:
         last_tick_key = ""
 
-        initial_candles = load_initial_candles(symbol, timeframe)
+        try:
+            sync_recent_closed_candles(symbol, timeframe, provider_name)
+        except Exception as exc:
+            await emit_provider_error(
+                websocket=websocket,
+                message=f"Falha ao sincronizar candles iniciais: {exc}",
+                symbol=symbol,
+                timeframe=timeframe,
+                provider_name=provider_name,
+            )
+
+        initial_candles = load_initial_candles(symbol, timeframe, provider_name)
 
         await websocket.send_json(
             {
@@ -300,6 +362,7 @@ async def websocket_feed(websocket: WebSocket) -> None:
                 "data": {
                     "symbol": symbol,
                     "timeframe": timeframe,
+                    "provider": provider_name,
                     "market_type": market_type,
                     "catalog": catalog,
                 },
@@ -312,6 +375,7 @@ async def websocket_feed(websocket: WebSocket) -> None:
                 "data": {
                     "symbol": symbol,
                     "timeframe": timeframe,
+                    "provider": provider_name,
                     "candles": initial_candles,
                 },
             }
@@ -319,16 +383,17 @@ async def websocket_feed(websocket: WebSocket) -> None:
 
         while True:
             try:
-                tick = try_build_live_tick(symbol, timeframe)
+                tick = try_build_live_tick(symbol, timeframe, provider_name)
             except ProviderQuotaExceededError as exc:
-                fallback_tick = build_tick_from_last_closed(symbol, timeframe)
+                fallback_tick = build_tick_from_last_closed(symbol, timeframe, provider_name)
 
                 if fallback_tick:
                     fallback_key = (
                         f"{fallback_tick['symbol']}|"
                         f"{fallback_tick['timeframe']}|"
                         f"{fallback_tick['open_time']}|"
-                        f"{fallback_tick['close']}"
+                        f"{fallback_tick['close']}|"
+                        f"{fallback_tick['provider']}"
                     )
 
                     if fallback_key != last_tick_key:
@@ -345,15 +410,37 @@ async def websocket_feed(websocket: WebSocket) -> None:
                     message=str(exc),
                     symbol=symbol,
                     timeframe=timeframe,
+                    provider_name=provider_name,
                 )
                 await asyncio.sleep(20)
                 continue
             except Exception as exc:
+                fallback_tick = build_tick_from_last_closed(symbol, timeframe, provider_name)
+
+                if fallback_tick:
+                    fallback_key = (
+                        f"{fallback_tick['symbol']}|"
+                        f"{fallback_tick['timeframe']}|"
+                        f"{fallback_tick['open_time']}|"
+                        f"{fallback_tick['close']}|"
+                        f"{fallback_tick['provider']}"
+                    )
+
+                    if fallback_key != last_tick_key:
+                        last_tick_key = fallback_key
+                        await websocket.send_json(
+                            {
+                                "event": "candle_tick",
+                                "data": fallback_tick,
+                            }
+                        )
+
                 await emit_provider_error(
                     websocket=websocket,
                     message=f"Falha no stream realtime: {exc}",
                     symbol=symbol,
                     timeframe=timeframe,
+                    provider_name=provider_name,
                 )
                 await asyncio.sleep(10)
                 continue
@@ -363,7 +450,8 @@ async def websocket_feed(websocket: WebSocket) -> None:
                     f"{tick['symbol']}|"
                     f"{tick['timeframe']}|"
                     f"{tick['open_time']}|"
-                    f"{tick['close']}"
+                    f"{tick['close']}|"
+                    f"{tick['provider']}"
                 )
 
                 if tick_key != last_tick_key:
@@ -422,6 +510,9 @@ async def websocket_feed(websocket: WebSocket) -> None:
 
             symbol = normalize_symbol(payload.get("symbol"))
             timeframe = normalize_timeframe(payload.get("timeframe"))
+            provider_name = normalize_provider(
+                payload.get("provider") if isinstance(payload.get("provider"), str) else None
+            )
             market_type = payload.get("market_type")
             catalog = payload.get("catalog")
 
@@ -433,6 +524,7 @@ async def websocket_feed(websocket: WebSocket) -> None:
                             "message": "Subscrição inválida: símbolo e timeframe são obrigatórios.",
                             "symbol": symbol,
                             "timeframe": timeframe,
+                            "provider": provider_name,
                         },
                     }
                 )
@@ -449,6 +541,7 @@ async def websocket_feed(websocket: WebSocket) -> None:
                 run_stream(
                     symbol=symbol,
                     timeframe=timeframe,
+                    provider_name=provider_name,
                     market_type=market_type if isinstance(market_type, str) else None,
                     catalog=catalog if isinstance(catalog, str) else None,
                 )
