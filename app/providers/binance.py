@@ -1,13 +1,18 @@
+# G:\O meu disco\python\Trader-bot\app\providers\binance.py
+
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from app.core.logging import get_logger
 from app.core.settings import get_settings
 from app.models.domain.candle import Candle
 from app.providers.base import BaseMarketDataProvider
+
+logger = get_logger(__name__)
 
 
 class BinanceProvider(BaseMarketDataProvider):
@@ -27,15 +32,33 @@ class BinanceProvider(BaseMarketDataProvider):
         interval = self._map_timeframe_to_interval(timeframe)
         normalized_symbol = self._normalize_symbol(symbol)
 
+        normalized_start_at = self._assume_utc(start_at)
+        normalized_end_at = self._assume_utc(end_at)
+
+        start_ms = int(normalized_start_at.timestamp() * 1000)
+        end_ms = int(normalized_end_at.timestamp() * 1000)
+
         params = {
             "symbol": normalized_symbol,
             "interval": interval,
-            "startTime": int(start_at.timestamp() * 1000),
-            "endTime": int(end_at.timestamp() * 1000),
+            "startTime": start_ms,
+            "endTime": end_ms,
             "limit": 1000,
         }
 
         url = f"{self.settings.binance_base_url}/api/v3/klines?{urlencode(params)}"
+
+        logger.info("###################################################################################")
+        logger.info(
+            "[BINANCE] REQUEST | SYMBOL=%s | TF=%s | START_UTC=%s | END_UTC=%s | START_MS=%s | END_MS=%s",
+            normalized_symbol,
+            timeframe,
+            normalized_start_at.isoformat(),
+            normalized_end_at.isoformat(),
+            start_ms,
+            end_ms,
+        )
+        logger.info("[BINANCE] URL | %s", url)
 
         request = Request(
             url,
@@ -66,14 +89,21 @@ class BinanceProvider(BaseMarketDataProvider):
         if not isinstance(payload, list):
             raise ValueError("Unexpected Binance response format")
 
+        logger.info(
+            "[BINANCE] RESPONSE_RAW | SYMBOL=%s | TF=%s | ITEMS=%s",
+            normalized_symbol,
+            timeframe,
+            len(payload),
+        )
+
         candles: list[Candle] = []
 
         for item in payload:
             if not isinstance(item, list) or len(item) < 7:
                 continue
 
-            open_time = datetime.utcfromtimestamp(item[0] / 1000)
-            close_time = datetime.utcfromtimestamp(item[6] / 1000)
+            open_time = datetime.fromtimestamp(item[0] / 1000, tz=UTC).replace(tzinfo=None)
+            close_time = datetime.fromtimestamp(item[6] / 1000, tz=UTC).replace(tzinfo=None)
 
             candles.append(
                 Candle(
@@ -90,7 +120,32 @@ class BinanceProvider(BaseMarketDataProvider):
                 )
             )
 
+        if candles:
+            logger.info(
+                "[BINANCE] RESPONSE_PARSED | SYMBOL=%s | TF=%s | COUNT=%s | FIRST_OPEN_UTC=%s | LAST_OPEN_UTC=%s | LAST_CLOSE_UTC=%s",
+                normalized_symbol,
+                timeframe,
+                len(candles),
+                candles[0].open_time.isoformat(),
+                candles[-1].open_time.isoformat(),
+                candles[-1].close_time.isoformat(),
+            )
+        else:
+            logger.info(
+                "[BINANCE] RESPONSE_PARSED | SYMBOL=%s | TF=%s | COUNT=0",
+                normalized_symbol,
+                timeframe,
+            )
+
+        logger.info("###################################################################################")
+
         return candles
+
+    def _assume_utc(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+
+        return value.astimezone(UTC)
 
     def _normalize_symbol(self, symbol: str) -> str:
         return (
